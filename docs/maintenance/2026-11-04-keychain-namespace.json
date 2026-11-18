@@ -1,0 +1,47 @@
+{
+  "issue": 77,
+  "option": "B",
+  "ownerSelected": "2026-11-04",
+  "baseline": "8458a67d36fdb4add1de27d9815210e9cbd1218e",
+  "namespace": "uk.jpsit.telephone.sip:<exact registrar>",
+  "legacyRetained": true,
+  "legacyAuthoritative": false,
+  "sourceValidation": {
+    "XCTest": 598,
+    "SwiftTesting": 48,
+    "total": 646,
+    "failures": 0,
+    "skips": 0,
+    "newNamespaceCases": 24,
+    "newAccountsCases": 3,
+    "unsignedArm64Release": "passed"
+  },
+  "realKeychainTouched": false,
+  "installedAcceptance": "pending",
+  "release": false,
+  "installation": false,
+  "sourceSHA256": {
+    "Telephone/AKKeychain.h": "63fbe93eabb43e6abee94210ec03a065ec96523c827ffb13b0f2ed4314ae5dde",
+    "Telephone/AKKeychain.m": "31ca7bfe3e6288cb99060de31b8f159511a931aafc4f3b2bc6f3aba2fec1d457",
+    "Telephone/AccountPreferencesViewController.m": "59286796bb527ecebd29668afa7520510e4e59104beed508e61663d33fd34eed",
+    "TelephoneTests/CredentialBrokerTests.m": "f72cf6b5746b279f8e0ac56b8ba38ac3900d5ffe30f40a457b375b4c4f055946",
+    "TelephoneTests/CredentialPreferencesTests.m": "d56d4003231314a72dd11f65a63b759f6121d58470205d878efd7eda4af76eb2"
+  },
+  "logSHA256": {
+    "canonical-final-build.log": "dd596af515760afb4311900390561abef7809e4e037d9dbef13252e0725b4ae2",
+    "canonical-final-host.log": "7ae8a9ff208c0056784bd98637574277306415d07e52cec6932703df08282018",
+    "canonical-final-test.log": "93cfc9bbde3412ed32ffe8fa681ddd4255c44673a34d987137db826b459df77f",
+    "canonical-release-build.log": "af2aa1adef4fc52ee1b34aedf38c282a87883e2b1e91a5aae7a25ae2fd80f147"
+  },
+  "results": "/private/tmp/jps-telephone-issue77/canonical-final.xcresult",
+  "knownBoundaries": [
+    "Actual login/file Keychain and copied ACL behaviour not exercised",
+    "Actual permission-prompt wording/count and registration pending",
+    "Legacy service fields remain as rollback copies",
+    "Two-item saves are not atomic; partial writes are reported",
+    "Deprecated file-Keychain reference/ACL APIs retained to preserve current store",
+    "Older-build edits to the backup do not silently override canonical credentials on upgrade"
+  ],
+  "canonicalFirst": true,
+  "legacyFallbackOnlyOnCanonicalAbsence": true
+}

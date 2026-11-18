@@ -1,0 +1,233 @@
+//
+//  AKSIPUserAgent.h
+//  Telephone
+//
+//  Copyright © 2008-2016 Alexey Kuznetsov
+//  Copyright © 2016-2022 64 Characters
+//
+//  Telephone is free software: you can redistribute it and/or modify
+//  it under the terms of the GNU General Public License as published by
+//  the Free Software Foundation, either version 3 of the License, or
+//  (at your option) any later version.
+//
+//  Telephone is distributed in the hope that it will be useful,
+//  but WITHOUT ANY WARRANTY; without even the implied warranty of
+//  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+//  GNU General Public License for more details.
+//
+
+#import <Foundation/Foundation.h>
+#import <pjsua-lib/pjsua.h>
+
+#import "AKSIPUserAgentDelegate.h"
+#import "AKSIPUserAgentNotifications.h"
+
+
+// User agent states.
+typedef NS_ENUM(NSInteger, AKSIPUserAgentState) {
+    AKSIPUserAgentStateStopped,
+    AKSIPUserAgentStateStarting,
+    AKSIPUserAgentStateStarted,
+    AKSIPUserAgentStateStopping
+};
+
+// NAT types, as specified by RFC 3489.
+typedef NS_ENUM(NSUInteger, AKNATType) {
+    kAKNATTypeUnknown        = PJ_STUN_NAT_TYPE_UNKNOWN,
+    kAKNATTypeErrorUnknown   = PJ_STUN_NAT_TYPE_ERR_UNKNOWN,
+    kAKNATTypeOpen           = PJ_STUN_NAT_TYPE_OPEN,
+    kAKNATTypeBlocked        = PJ_STUN_NAT_TYPE_BLOCKED,
+    kAKNATTypeSymmetricUDP   = PJ_STUN_NAT_TYPE_SYMMETRIC_UDP,
+    kAKNATTypeFullCone       = PJ_STUN_NAT_TYPE_FULL_CONE,
+    kAKNATTypeSymmetric      = PJ_STUN_NAT_TYPE_SYMMETRIC,
+    kAKNATTypeRestricted     = PJ_STUN_NAT_TYPE_RESTRICTED,
+    kAKNATTypePortRestricted = PJ_STUN_NAT_TYPE_PORT_RESTRICTED
+};
+
+typedef struct _AKSIPUserAgentCallData {
+    pj_bool_t ringbackOn;
+} AKSIPUserAgentCallData;
+
+// An invalid identifier for all sorts of identifiers.
+extern const NSInteger kAKSIPUserAgentInvalidIdentifier;
+
+@class AKSIPAccount, AKSIPCall, AKSIPURIParser;
+
+// Legacy object-pointer contracts remain explicitly unspecified to preserve their
+// existing Swift importer behavior; new recovery APIs state their own contract.
+// The AKSIPUserAgent class implements SIP User Agent functionality. You can use it to create, configure, and start user
+// agent, add and remove accounts, and set sound devices for input and output. You need to restart the user agent after
+// you change its properties when it is already running.
+@interface AKSIPUserAgent : NSObject {
+  @private
+    AKSIPUserAgentCallData _callData[PJSUA_MAX_CALLS];
+    pj_thread_desc _descriptor;
+}
+
+// The receiver's delegate.
+@property(nonatomic, weak) id <AKSIPUserAgentDelegate> _Null_unspecified delegate;
+
+// A Boolean value indicating whether the receiver has been started.
+@property(nonatomic, readonly, assign, getter=isStarted) BOOL started;
+
+// Receiver's state.
+@property(readonly, assign) AKSIPUserAgentState state;
+
+// NAT type that has been detected by the receiver.
+@property(nonatomic, assign) AKNATType detectedNATType;
+
+// The number of acitve calls controlled by the receiver.
+@property(nonatomic, readonly, assign) NSInteger activeCallsCount;
+
+@property(nonatomic, readonly) BOOL hasUnansweredIncomingCalls;
+
+// Receiver's call data.
+@property(nonatomic, readonly, assign, nonnull) AKSIPUserAgentCallData *callData;
+
+@property(nonatomic, assign) NSInteger maxCalls;
+
+// An array of DNS servers to use by the receiver. If set, DNS SRV will be
+// enabled. Only first kAKSIPUserAgentNameServersMax are used.
+@property(nonatomic, copy) NSArray * _Null_unspecified nameServers;
+
+// SIP proxy host to visit for all outgoing requests. Will be used for all
+// accounts. The final route set for outgoing requests consists of this proxy
+// and proxy configured for the account.
+@property(nonatomic, copy) NSString * _Null_unspecified outboundProxyHost;
+
+// Network port to use with the outbound proxy.
+// Default: 5060.
+@property(nonatomic, assign) NSUInteger outboundProxyPort;
+
+// STUN server host.
+@property(nonatomic, copy) NSString * _Null_unspecified STUNServerHost;
+
+// Network port to use with the STUN server.
+// Default: 3478.
+@property(nonatomic, assign) NSUInteger STUNServerPort;
+
+// User agent string.
+@property(nonatomic, copy) NSString * _Null_unspecified userAgentString;
+
+// Path to the log file.
+@property(nonatomic, copy) NSString * _Null_unspecified logFileName;
+
+// Verbosity level.
+// Default: 3.
+@property(nonatomic, assign) NSUInteger logLevel;
+
+// Verbosity leverl for console.
+// Default: 0.
+@property(nonatomic, assign) NSUInteger consoleLogLevel;
+
+// A Boolean value indicating whether Voice Activity Detection is used.
+// Default: YES.
+@property(nonatomic, assign) BOOL detectsVoiceActivity;
+
+// A Boolean value indicating whether Interactive Connectivity Establishment
+// is used.
+// Default: NO.
+@property(nonatomic, assign) BOOL usesICE;
+
+/// A Boolean value indicating if QoS is used.
+/// Default: YES.
+@property(nonatomic, assign) BOOL usesQoS;
+
+// Network port to use for SIP transport. Set 0 for any available port.
+// Default: 0.
+@property(nonatomic, assign) NSUInteger transportPort;
+
+
+/// A Boolean value indicating if only G.711 codec is used.
+@property(nonatomic, assign) BOOL usesG711Only;
+
+/// A Boolean value indicating if a codec should be locked.
+///
+/// If remote sends SDP answer containing more than one format or codec in
+/// the media line, send re-INVITE or UPDATE with just one codec to lock
+/// which codec to use.
+///
+/// Default: YES.
+@property(nonatomic, assign) BOOL locksCodec;
+
+@property(nonatomic, readonly) AKSIPURIParser * _Null_unspecified parser;
+
+// Returns the shared SIP user agent object.
++ (AKSIPUserAgent * _Null_unspecified )sharedUserAgent;
+
+// Designated initializer. Initializes a SIP user agent and sets its delegate.
+- (instancetype _Null_unspecified)initWithDelegate:(id <AKSIPUserAgentDelegate> _Null_unspecified)aDelegate;
+
+// Starts user agent.
+- (void)start;
+
+// Stops user agent.
+- (void)stop;
+- (void)stopAndWait;
+
+// Native commands run on the same serial control thread as startup/teardown.
+// Completion always returns to main, including cancellation of an old lifecycle.
+- (void)performSIPOperation:(pj_status_t (^ _Nonnull)(void))operation
+                completion:(void (^ _Nullable)(pj_status_t status))completion;
+- (void)performSIPCleanupOperation:(pj_status_t (^ _Nonnull)(void))operation
+                       completion:(void (^ _Nullable)(pj_status_t status))completion;
+
+// Adds an account to the user agent.
+- (BOOL)addAccount:(AKSIPAccount * _Null_unspecified )anAccount withPassword:(NSString * _Null_unspecified )aPassword;
+
+// Removes an account from the user agent.
+- (BOOL)removeAccount:(AKSIPAccount * _Null_unspecified )account;
+- (void)addAccount:(AKSIPAccount * _Nonnull)account withPassword:(NSString * _Nullable)password completion:(void (^ _Nonnull)(BOOL))completion;
+- (void)removeAccount:(AKSIPAccount * _Nonnull)account completion:(void (^ _Nonnull)(BOOL))completion;
+- (void)forgetRetiredAccountIfUnused:(AKSIPAccount * _Nonnull)account;
+- (AKSIPCall * _Nullable)callWithIdentifier:(NSInteger)identifier dialogIdentifier:(NSString * _Nonnull)dialogIdentifier;
+
+// Returns a SIP account with a given identifier.
+- (AKSIPAccount * _Null_unspecified )accountWithIdentifier:(NSInteger)identifier;
+
+// Returns a SIP call with a given identifier.
+- (AKSIPCall * _Null_unspecified )callWithIdentifier:(NSInteger)identifier;
+
+// Hangs up all calls controlled by the receiver.
+- (void)hangUpAllCalls;
+
+// Starts local ringback sound for the specified call.
+- (void)startRingbackForCall:(AKSIPCall * _Null_unspecified )call;
+
+// Stops local ringback sound for the specified call.
+- (void)stopRingbackForCall:(AKSIPCall * _Null_unspecified )call;
+
+// Sets sound input and output.
+- (BOOL)setSoundInputDevice:(NSInteger)input soundOutputDevice:(NSInteger)output;
+// Admit a complete enumeration/mapping/open transaction before scheduling the SDK worker.
+- (BOOL)performAudioSelection:(pj_status_t (^ _Nonnull)(NSUInteger revision))operation;
+- (BOOL)isAudioSelectionCurrent:(NSUInteger)revision;
+
+// Audio failure stays visible until a real device selection succeeds. Recovery
+// is explicit; generic device notifications never reset the retry barrier.
+@property(nonatomic, readonly) BOOL hasAudioFailure;
+@property(atomic, readonly) BOOL audioCommandPending;
+// Main-admitted selection/retry identity. Together with audioGeneration this
+// lets presentation ignore an older command without cancelling native work.
+@property(atomic, readonly) NSUInteger audioSelectionRevision;
+- (void)reportAudioSelectionFailure;
+@property(atomic, readonly) NSUInteger audioGeneration;
+// A pending make-call must finish classification on main before another is
+// enqueued. This bounds SDK implicit audio opens across rapid/double requests.
+- (BOOL)beginOutgoingCall;
+- (void)finishOutgoingCallForGeneration:(NSUInteger)generation;
+@property(nonatomic, copy, nullable) BOOL (^soundIOSelectionRetry)(void);
+- (BOOL)retrySoundAfterFailure;
+- (void)resetAudioFailure;
+- (pj_status_t)connectAudioSource:(pjsua_conf_port_id)source destination:(pjsua_conf_port_id)destination;
+- (void)reportAudioFailure:(pj_status_t)status operation:(nonnull NSString *)operation;
+
+// Stops sound.
+- (BOOL)stopSound;
+
+// Updates list of audio devices.
+// You might want to call this method when system audio devices are changed. After calling this method,
+// |setSoundInputDevice:soundOutputDevice:| must be called to set appropriate sound IO.
+- (void)updateAudioDevices;
+
+@end

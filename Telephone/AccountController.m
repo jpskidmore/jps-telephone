@@ -1,0 +1,1086 @@
+//
+//  AccountController.m
+//  Telephone
+//
+//  Copyright © 2008-2016 Alexey Kuznetsov
+//  Copyright © 2016-2022 64 Characters
+//
+//  Telephone is free software: you can redistribute it and/or modify
+//  it under the terms of the GNU General Public License as published by
+//  the Free Software Foundation, either version 3 of the License, or
+//  (at your option) any later version.
+//
+//  Telephone is distributed in the hope that it will be useful,
+//  but WITHOUT ANY WARRANTY; without even the implied warranty of
+//  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+//  GNU General Public License for more details.
+//
+
+#import "AccountController.h"
+
+@import AddressBook;
+@import UseCases;
+
+#import "AKABAddressBook+Localizing.h"
+#import "AKKeychain.h"
+#import "AKNetworkReachability.h"
+#import "AKNSString+Scanning.h"
+#import "AKSIPURIFormatter.h"
+#import "AKTelephoneNumberFormatter.h"
+
+#import "AccountControllerToAccountAdapter.h"
+#import "AccountViewController.h"
+#import "AccountWindowController.h"
+#import "ActiveAccountViewController.h"
+#import "AuthenticationFailureController.h"
+#import "CallTransferController.h"
+#import "SIPResponseLocalization.h"
+
+#import "Telephone-Swift.h"
+
+NSString * const kEmailSIPLabel = @"sip";
+NSNotificationName const JPSPendingRoutedCallsDidChangeNotification = @"JPSPendingRoutedCallsDidChangeNotification";
+
+@interface AccountController () <AccountWindowControllerDelegate>
+
+@property(nonatomic) AKNetworkReachability *registrarReachability;
+
+@property(nonatomic, readonly) AKSIPUserAgent *userAgent;
+@property(nonatomic, readonly) WorkspaceSleepStatus *sleepStatus;
+
+@property(nonatomic, readonly) AuthenticationFailureController *authenticationFailureController;
+
+@property(nonatomic) NSMutableArray<NSDictionary *> *pendingRoutedCalls;
+@property(nonatomic) NSTimer *routedCallTimeout;
+
+@property(nonatomic, readonly, getter=isAccountAdded) BOOL accountAdded;
+@property(nonatomic, strong) NSTimer *reRegistrationTimer;
+@property(nonatomic, copy) NSString *destinationToCall;
+@property(nonatomic) AccountWindowControllerAccountState desiredAvailability;
+@property(nonatomic) BOOL addingAccount;
+@property(nonatomic, readwrite) NSUInteger credentialAccessGeneration;
+@property(nonatomic, readwrite) BOOL credentialAccessSuspended;
+@property(nonatomic) BOOL credentialReadBlocked;
+@property(nonatomic, copy) NSString *admittedPassword;
+
+@end
+
+@implementation AccountController
+
+@synthesize authenticationFailureController = _authenticationFailureController;
+
+- (void)setEnabled:(BOOL)flag {
+    _enabled = flag;
+    
+    NSNotificationCenter *notificationCenter = [NSNotificationCenter defaultCenter];
+    
+    if (flag) {
+        AKNetworkReachability *reachability
+            = [AKNetworkReachability networkReachabilityWithHost:self.account.registrar.host];
+        [self setRegistrarReachability:reachability];
+        
+        if (reachability != nil) {
+            [notificationCenter addObserver:self
+                                   selector:@selector(networkReachabilityDidBecomeReachable:)
+                                       name:AKNetworkReachabilityDidBecomeReachableNotification
+                                     object:reachability];
+        }
+    } else {
+        [self invalidateCredentialAccess];
+        [self cancelPendingRoutedCalls];
+        if ([self registrarReachability] != nil) {
+            [notificationCenter removeObserver:self
+                                          name:AKNetworkReachabilityDidBecomeReachableNotification
+                                        object:[self registrarReachability]];
+            
+            [self setRegistrarReachability:nil];
+        }
+    }
+}
+
+- (BOOL)isAccountRegistered {
+    return [[self account] isRegistered];
+}
+
+- (void)setAccountRegistered:(BOOL)flag {
+    [self invalidateReRegistrationTimer];
+    // Positive admission is closed during sleep, session suspension and quit,
+    // including accounts already present in the native registry. Unregistering
+    // an existing account remains possible while admission is suspended.
+    if (flag && (!self.isEnabled || self.credentialAccessSuspended || self.sleepStatus.isSleeping)) return;
+    self.account.desiredRegistered = flag;
+    if (!self.userAgent.isStarted) {
+        self.attemptingToRegisterAccount = flag;
+        self.attemptingToUnregisterAccount = !flag && self.desiredAvailability == AccountWindowControllerAccountStateUnavailable;
+        return;
+    }
+    if (self.isAccountAdded) {
+        if (self.desiredAvailability != AccountWindowControllerAccountStateOffline) [self showConnectingState];
+        self.account.registered = flag;
+        return;
+    }
+    if (self.addingAccount || self.credentialReadBlocked || self.credentialAccessSuspended ||
+        !self.isEnabled || self.sleepStatus.isSleeping ||
+        self.desiredAvailability == AccountWindowControllerAccountStateOffline) return;
+    self.addingAccount = YES;
+    AKSIPAccount *account = self.account;
+    AKSIPUserAgent *agent = self.userAgent;
+    NSString *service = [NSString stringWithFormat:@"SIP: %@", account.registrar];
+    NSString *username = [account.username copy];
+    NSUInteger generation = ++self.credentialAccessGeneration;
+    [self showConnectingState];
+    __weak AccountController *weakSelf = self;
+    [self.credentialBroker readPasswordForService:service account:username completion:^(AKCredentialReadResult *result) {
+        AccountController *controller = weakSelf;
+        if (![controller credentialRequestIsCurrent:generation account:account service:service username:username]) return;
+        if (result.status != AKCredentialReadStatusSuccess) {
+            controller.addingAccount = NO;
+            controller.credentialReadBlocked = YES;
+            controller.admittedPassword = nil;
+            controller.attemptingToRegisterAccount = NO;
+            controller.attemptingToUnregisterAccount = NO;
+            [controller cancelPendingRoutedCalls];
+            [controller showUnavailableState];
+            if (result.status != AKCredentialReadStatusSuperseded) [controller presentCredentialReadFailure:result];
+            return;
+        }
+        controller.admittedPassword = result.password;
+        [agent addAccount:account withPassword:result.password completion:^(BOOL added) {
+            AccountController *current = weakSelf;
+            if (![current credentialRequestIsCurrent:generation account:account service:service username:username]) {
+                BOOL newerOwner = current.account == account && current.isEnabled && !current.credentialAccessSuspended &&
+                    current.desiredAvailability != AccountWindowControllerAccountStateOffline &&
+                    current.credentialAccessGeneration != generation;
+                if (added && !newerOwner) [agent removeAccount:account completion:^(BOOL removed) {}];
+                return;
+            }
+            current.addingAccount = NO;
+            if (added) {
+                if (!account.desiredRegistered) {
+                    [current showUnavailableState];
+                    [current dispatchPendingRoutedCalls];
+                }
+            } else {
+                current.admittedPassword = nil;
+                BOOL hadPendingCalls = current.hasPendingRoutedCalls;
+                [current cancelPendingRoutedCalls];
+                [current showUnavailableState];
+                if (hadPendingCalls) [DialPlanCoordinator.shared presentFailure:[NSString stringWithFormat:@"%@ could not connect. No other connection was used.", current.accountDescription]];
+            }
+        }];
+    }];
+}
+
+- (AKCredentialBroker *)credentialBroker { return AKCredentialBroker.sharedBroker; }
+
+- (BOOL)credentialRequestIsCurrent:(NSUInteger)generation account:(AKSIPAccount *)account
+                          service:(NSString *)service username:(NSString *)username {
+    return self != nil && self.credentialAccessGeneration == generation && self.account == account &&
+        self.isEnabled && !self.credentialAccessSuspended && self.userAgent.isStarted && !self.sleepStatus.isSleeping &&
+        self.desiredAvailability != AccountWindowControllerAccountStateOffline &&
+        [account.username isEqualToString:username] &&
+        [[NSString stringWithFormat:@"SIP: %@", account.registrar] isEqualToString:service];
+}
+
+- (void)invalidateCredentialAccess {
+    self.credentialAccessGeneration++;
+    self.addingAccount = NO;
+    self.admittedPassword = nil;
+    // Do not load a sheet solely to erase an uncreated field.
+    [_authenticationFailureController clearCredentialPresentation];
+    if (self.account.username != nil && self.account.registrar != nil) {
+        [self.credentialBroker invalidateService:[NSString stringWithFormat:@"SIP: %@", self.account.registrar]
+                                        account:self.account.username];
+    }
+}
+
+- (void)setCredentialAccessSuspended:(BOOL)suspended {
+    _credentialAccessSuspended = suspended;
+    if (suspended) [self invalidateCredentialAccess];
+}
+
+- (void)presentCredentialReadFailure:(AKCredentialReadResult *)result {
+    NSString *message;
+    switch (result.status) {
+        case AKCredentialReadStatusCancelled:
+            message = NSLocalizedString(@"Keychain access was cancelled. Choose Online to try again when you are ready.", @"Cancelled credential read."); break;
+        case AKCredentialReadStatusMissing:
+            message = NSLocalizedString(@"No saved password was found. Enter it in Settings → Accounts, then choose Online.", @"Missing credential read."); break;
+        case AKCredentialReadStatusDenied:
+            message = NSLocalizedString(@"Keychain access was denied. Choose Online to deliberately try again, or update the password in Settings → Accounts.", @"Denied credential read."); break;
+        default:
+            message = NSLocalizedString(@"The saved password could not be read. Update it in Settings → Accounts, then choose Online to try again.", @"Failed credential read."); break;
+    }
+    [DialPlanCoordinator.shared presentFailure:message];
+}
+
+- (BOOL)isAccountAdded {
+    return self.account.identifier != kAKSIPUserAgentInvalidIdentifier;
+}
+
+- (AuthenticationFailureController *)authenticationFailureController {
+    if (_authenticationFailureController == nil) {
+        _authenticationFailureController
+            = [[AuthenticationFailureController alloc] initWithAccountController:self userAgent:self.userAgent];
+    }
+    
+    return _authenticationFailureController;
+}
+
+- (BOOL)canMakeCalls {
+    return self.isEnabled && self.isAccountAdded && self.desiredAvailability != AccountWindowControllerAccountStateOffline;
+}
+
+- (instancetype)initWithSIPAccount:(AKSIPAccount *)account
+                accountDescription:(NSString *)accountDescription
+                         userAgent:(AKSIPUserAgent *)userAgent
+                  ringtonePlayback:(id<RingtonePlaybackUseCase>)ringtonePlayback
+                       sleepStatus:(WorkspaceSleepStatus *)sleepStatus{
+
+    self = [super init];
+    if (self == nil) {
+        return nil;
+    }
+
+    _account = account;
+    _account.delegate = self;
+    _userAgent = userAgent;
+    _ringtonePlayback = ringtonePlayback;
+    _sleepStatus = sleepStatus;
+
+    _callControllers = [[NSMutableArray alloc] init];
+    _accountDescription = [accountDescription copy];
+    _destinationToCall = @"";
+    _desiredAvailability = AccountWindowControllerAccountStateAvailable;
+
+    _pendingRoutedCalls = [NSMutableArray array];
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(SIPUserAgentDidFinishStarting:)
+                                                 name:AKSIPUserAgentDidFinishStartingNotification
+                                               object:nil];
+    
+    return self;
+}
+
+- (void)dealloc {
+    [_authenticationFailureController clearCredentialPresentation];
+    [self.routedCallTimeout invalidate];
+    for (CallController *aCallController in [self callControllers]) {
+        [aCallController close];
+    }
+    
+    if ([[[self account] delegate] isEqual:self]) {
+        [[self account] setDelegate:nil];
+    }
+    
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
+    
+    // Close authentication failure sheet if it's raised.
+    [[_authenticationFailureController cancelButton] performClick:nil];
+}
+
+- (NSString *)description {
+    return [NSString stringWithFormat:@"%@ controller", [self account]];
+}
+
+- (void)registerAccount {
+    self.desiredAvailability = AccountWindowControllerAccountStateAvailable;
+    self.accountUnavailable = NO;
+    if (![[self userAgent] isStarted]) {
+        [self setAttemptingToRegisterAccount:YES];
+    }
+    [self setAccountRegistered:YES];
+}
+
+- (void)unregisterAccount {
+    if (![self isAccountAdded]) {
+        [self setAttemptingToUnregisterAccount:YES];
+    }
+    [self setAccountRegistered:NO];
+}
+
+- (void)resumeRegistrationIfDesired {
+    if (!self.isEnabled || self.desiredAvailability == AccountWindowControllerAccountStateOffline) return;
+    if (self.desiredAvailability == AccountWindowControllerAccountStateUnavailable) [self setAccountRegistered:NO];
+    else [self setAccountRegistered:YES];
+}
+
+- (void)removeAccountFromUserAgent {
+    [self removeAccountFromUserAgentWithCompletion:^(BOOL removed) {}];
+}
+
+- (void)removeAccountFromUserAgentWithCompletion:(void (^)(BOOL))completion {
+    [self invalidateCredentialAccess];
+    [self cancelPendingRoutedCalls];
+    [self.account cancelPendingOutgoingCalls];
+    self.attemptingToRegisterAccount = NO;
+    self.attemptingToUnregisterAccount = NO;
+    [self invalidateReRegistrationTimer];
+    [self showOfflineState];
+    if (self.account.identifier == kAKSIPUserAgentInvalidIdentifier) { completion(YES); return; }
+    [self.userAgent removeAccount:self.account completion:completion];
+}
+
+- (void)makeCallToURI:(AKSIPURI *)destinationURI
+        phoneLabel:(NSString *)phoneLabel
+        callTransferController:(CallTransferController *)callTransferController {
+    
+    [self makeCallToURI:destinationURI phoneLabel:phoneLabel callTransferController:callTransferController canonicalDestination:nil];
+}
+
+- (void)makeCallToURI:(AKSIPURI *)destinationURI phoneLabel:(NSString *)phoneLabel callTransferController:(CallTransferController *)callTransferController canonicalDestination:(NSString *)canonicalDestination {
+    destinationURI = [destinationURI copy];
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    AKTelephoneNumberFormatter *telephoneNumberFormatter = [[AKTelephoneNumberFormatter alloc] init];
+    [telephoneNumberFormatter setSplitsLastFourDigits:
+     [defaults boolForKey:UserDefaultsKeys.telephoneNumberFormatterSplitsLastFourDigits]];
+    
+    NSString *enteredCallDestinationString = [[destinationURI user] copy];
+    
+    // Canonical routed numbers already passed strict validation. Service strings
+    // and explicit SIP URIs must keep their syntax and transport.
+    if (canonicalDestination == nil && callTransferController != nil && ![[destinationURI user] ak_hasLetters]) {
+        [destinationURI setUser:[telephoneNumberFormatter telephoneNumberFromString:[destinationURI user]]];
+    }
+    
+    // Replace plus character if needed.
+    if (destinationURI.host.length == 0 && [self substitutesPlusCharacter] &&
+        [[destinationURI user] hasPrefix:@"+"]) {
+        [destinationURI setUser:[[destinationURI user]
+                                 stringByReplacingCharactersInRange:NSMakeRange(0, 1)
+                                                         withString:[self plusCharacterSubstitution]]];
+        enteredCallDestinationString = [enteredCallDestinationString
+                                        stringByReplacingCharactersInRange:NSMakeRange(0, 1)
+                                                                withString:[self plusCharacterSubstitution]];
+    }
+    
+    // If it's a regular call, not a transfer, create the new CallController.
+    CallController *aCallController;
+    if (callTransferController == nil) {
+        aCallController = [[CallController alloc] initWithWindowNibName:@"Call"
+                                                      accountController:self
+                                                              userAgent:self.userAgent
+                                                               delegate:self];
+    } else {
+        aCallController = callTransferController;
+    }
+    
+    [aCallController setNameFromAddressBook:[destinationURI displayName]];
+    [aCallController setPhoneLabelFromAddressBook:phoneLabel];
+    [aCallController setEnteredCallDestination:enteredCallDestinationString];
+    [[self callControllers] addObject:aCallController];
+    
+    // Set title.
+    if ([[destinationURI host] length] > 0) {
+        [aCallController setTitle:[destinationURI SIPAddress]];
+        
+    } else if (![enteredCallDestinationString ak_hasLetters]) {
+        if ([enteredCallDestinationString ak_isTelephoneNumber] && [defaults boolForKey:UserDefaultsKeys.formatTelephoneNumbers]) {
+            [aCallController setTitle:[telephoneNumberFormatter stringForObjectValue:enteredCallDestinationString]];
+        } else {
+            [aCallController setTitle:enteredCallDestinationString];
+        }
+    } else {
+        [aCallController setTitle:[[SIPAddress alloc] initWithUser:destinationURI.user host:self.account.uri.host].stringValue];
+    }
+    
+    // Set displayed name.
+    if ([[destinationURI displayName] length] > 0) {
+        [aCallController setDisplayedName:[destinationURI displayName]];
+        
+    } else {
+        if ([[destinationURI host] length] > 0) {
+            [aCallController setDisplayedName:[destinationURI SIPAddress]];
+            
+        } else if ([enteredCallDestinationString ak_isTelephoneNumber] &&
+                   [defaults boolForKey:UserDefaultsKeys.formatTelephoneNumbers]) {
+            
+            [aCallController setDisplayedName:
+             [telephoneNumberFormatter stringForObjectValue:enteredCallDestinationString]];
+            
+        } else {
+            [aCallController setDisplayedName:enteredCallDestinationString];
+        }
+    }
+    
+    // Clean display-name part of the destination URI to prevent another call
+    // party from seeing local Address Book records.
+    [destinationURI setDisplayName:@""];
+    
+    if ([[destinationURI host] length] == 0) {
+        [destinationURI setHost:[[[self account] uri] host]];
+    }
+    
+    // Redial retains the pre-provider canonical destination.
+    aCallController.canonicalDestination = canonicalDestination.length ? canonicalDestination : nil;
+    [aCallController setRedialURI:destinationURI];
+    
+    [aCallController prepareForCall];
+
+    if ([phoneLabel length] > 0) {
+        [aCallController setStatus:
+         [NSString stringWithFormat:NSLocalizedString(@"calling %@...",
+                                                      @"Outgoing call in progress. Calling specific phone "
+                                                       "type (mobile, home, etc)."), phoneLabel]];
+    } else {
+        [aCallController setStatus:NSLocalizedString(@"calling...", @"Outgoing call in progress.")];
+    }
+    
+    if (callTransferController == nil) {
+        [aCallController showWindow:self];
+    }
+    
+    // Finally, make a call.
+    [self.account makeCallTo:destinationURI completion:^(AKSIPCall *call) {
+        if (!aCallController.acceptsPendingCallResult || !self.isEnabled) { [call hangUp]; return; }
+        if (call != nil) {
+            call.canonicalDestination = canonicalDestination.length ? canonicalDestination : nil;
+            [aCallController setCall:call];
+            [aCallController setCallActive:YES];
+        } else {
+            [aCallController showEndedCallView];
+            [aCallController setStatus:NSLocalizedString(@"Call Failed", @"Call failed.")];
+        }
+    }];
+}
+
+- (NSString *)routingAvailability {
+    if (!self.isEnabled || self.desiredAvailability == AccountWindowControllerAccountStateOffline) return @"offline";
+    if (self.isAccountRegistered) return @"online";
+    if (self.isAccountUnavailable && self.isAccountAdded) return @"unavailable";
+    if (self.addingAccount || self.attemptingToRegisterAccount || self.userAgent.state == AKSIPUserAgentStateStarting) return @"registering";
+    if (self.account.registrationStatus >= 300 && self.account.registrationExpireTime == kAKSIPAccountRegistrationExpireTimeNotSpecified) return @"failed";
+    return @"needsRegistration";
+}
+- (NSString *)accountUUID { return self.account.uuid; }
+
+- (void)changeRoutingAvailability:(NSString *)availability {
+    AccountWindowControllerAccountState state = [availability isEqualToString:@"offline"] ? AccountWindowControllerAccountStateOffline :
+        [availability isEqualToString:@"unavailable"] ? AccountWindowControllerAccountStateUnavailable : AccountWindowControllerAccountStateAvailable;
+    [self changeAccountState:state];
+}
+
+- (void)makeCallToURI:(AKSIPURI *)destinationURI phoneLabel:(NSString *)phoneLabel {
+    [DialPlanCoordinator.shared routeURI:destinationURI phoneLabel:phoneLabel ?: @""];
+}
+
+- (void)makeRoutedCallToURI:(AKSIPURI *)uri phoneLabel:(NSString *)phoneLabel canonicalDestination:(NSString *)canonicalDestination {
+    if (!self.isEnabled || self.desiredAvailability == AccountWindowControllerAccountStateOffline) {
+        [DialPlanCoordinator.shared presentFailure:[NSString stringWithFormat:@"%@ is Offline. Choose Online before calling.", self.accountDescription]];
+        return;
+    }
+    AKSIPURI *frozenURI = [uri copy];
+    NSString *identifier = NSUUID.UUID.UUIDString;
+    NSString *canonical = [canonicalDestination copy] ?: @"";
+    NSString *destination = canonical.length ? canonical : (frozenURI.host.length ? frozenURI.SIPAddress : frozenURI.user);
+    NSDictionary<NSString *, NSString *> *summary = @{@"id": identifier,
+                                                       @"accountUUID": [self.accountUUID copy] ?: @"",
+                                                       @"providerName": [self.accountDescription copy] ?: @"",
+                                                       @"destination": [destination copy] ?: @""};
+    NSDictionary *request = @{@"uri": frozenURI, @"label": [phoneLabel copy] ?: @"", @"canonical": canonical, @"id": identifier, @"summary": summary};
+    if (!self.isAccountAdded || (!self.isAccountRegistered && !self.isAccountUnavailable)) {
+        [self.pendingRoutedCalls addObject:request];
+        if (self.routedCallTimeout == nil) {
+            __weak AccountController *weakSelf = self;
+            self.routedCallTimeout = [NSTimer scheduledTimerWithTimeInterval:30 repeats:NO block:^(NSTimer *timer) {
+                BOOL pending = weakSelf.hasPendingRoutedCalls;
+                [weakSelf cancelPendingRoutedCalls];
+                if (pending) [DialPlanCoordinator.shared presentFailure:[NSString stringWithFormat:@"%@ did not register in time. The pending call was cancelled; try again when it is Online.", weakSelf.accountDescription]];
+            }];
+        }
+        self.shouldPresentRegistrationError = YES;
+        if (self.isAccountUnavailable || self.desiredAvailability == AccountWindowControllerAccountStateUnavailable) [self setAccountRegistered:NO];
+        else [self registerAccount];
+        [self notifyPendingRoutedCallsDidChange];
+        return;
+    }
+    [self dispatchRoutedRequest:request];
+}
+
+- (BOOL)hasPendingRoutedCalls { return self.pendingRoutedCalls.count > 0; }
+- (NSArray<NSDictionary<NSString *, NSString *> *> *)pendingRoutedCallSummaries {
+    NSMutableArray<NSDictionary<NSString *, NSString *> *> *summaries = [NSMutableArray arrayWithCapacity:self.pendingRoutedCalls.count];
+    for (NSDictionary *request in self.pendingRoutedCalls) [summaries addObject:request[@"summary"]];
+    return summaries.copy;
+}
+- (BOOL)cancelPendingRoutedCallWithIdentifier:(NSString *)identifier {
+    NSUInteger index = [self.pendingRoutedCalls indexOfObjectPassingTest:^BOOL(NSDictionary *request, NSUInteger index, BOOL *stop) {
+        return [request[@"id"] isEqualToString:identifier];
+    }];
+    if (index == NSNotFound) return NO;
+    [self.pendingRoutedCalls removeObjectAtIndex:index];
+    // Later requests share the first request's deadline; removing one must not
+    // restart or replace the account's existing registration timer.
+    if (!self.hasPendingRoutedCalls) {
+        [self.routedCallTimeout invalidate]; self.routedCallTimeout = nil;
+    }
+    [self notifyPendingRoutedCallsDidChange];
+    return YES;
+}
+- (void)cancelPendingRoutedCalls {
+    BOOL hadPendingCalls = self.hasPendingRoutedCalls;
+    [self.pendingRoutedCalls removeAllObjects];
+    [self.routedCallTimeout invalidate]; self.routedCallTimeout = nil;
+    if (hadPendingCalls) [self notifyPendingRoutedCallsDidChange];
+}
+- (void)notifyPendingRoutedCallsDidChange {
+    void (^postChange)(void) = ^{
+        [NSNotificationCenter.defaultCenter postNotificationName:JPSPendingRoutedCallsDidChangeNotification object:nil];
+    };
+    if (NSThread.isMainThread) postChange();
+    else dispatch_async(dispatch_get_main_queue(), postChange);
+}
+
+- (void)dispatchRoutedRequest:(NSDictionary *)request {
+    [self makeCallToURI:request[@"uri"] phoneLabel:request[@"label"] callTransferController:nil canonicalDestination:request[@"canonical"]];
+}
+- (void)dispatchPendingRoutedCalls {
+    if (!self.isEnabled || !self.isAccountAdded || self.desiredAvailability == AccountWindowControllerAccountStateOffline) { [self cancelPendingRoutedCalls]; return; }
+    NSArray *requests = self.pendingRoutedCalls.copy;
+    [self cancelPendingRoutedCalls];
+    for (NSDictionary *request in requests) [self dispatchRoutedRequest:request];
+}
+
+- (void)makeCallToDestinationRegisteringAccountIfNeeded:(SanitizedCallDestination *)destination {
+    [DialPlanCoordinator.shared routeDestination:destination.value phoneLabel:@""];
+}
+
+- (void)showWindow { [DialPlanCoordinator.shared showDialler]; }
+- (void)showWindowWithoutMakingKey { [DialPlanCoordinator.shared showDialler]; }
+- (void)hideWindow { }
+- (BOOL)isWindowKey { return NSApp.mainWindow.isKeyWindow; }
+- (void)orderWindow:(NSWindowOrderingMode)place relativeTo:(NSInteger)otherWindow { [DialPlanCoordinator.shared showDialler]; }
+- (NSInteger)windowNumber { return NSApp.mainWindow.windowNumber; }
+
+- (void)changeAccountState:(AccountWindowControllerAccountState)state {
+    [self invalidateCredentialAccess];
+    if (state != AccountWindowControllerAccountStateOffline) self.credentialReadBlocked = NO;
+    self.desiredAvailability = state;
+    self.attemptingToRegisterAccount = NO;
+    self.attemptingToUnregisterAccount = NO;
+    [self invalidateReRegistrationTimer];
+    switch (state) {
+        case AccountWindowControllerAccountStateOffline:
+            self.accountUnavailable = NO;
+            [self.account cancelPendingOutgoingCalls];
+            self.destinationToCall = @"";
+            [self cancelPendingRoutedCalls];
+            self.account.registered = NO;
+            [self showOfflineState];
+            break;
+        case AccountWindowControllerAccountStateAvailable:
+            self.accountUnavailable = NO;
+            self.shouldPresentRegistrationError = YES;
+            [self registerAccount];
+            break;
+        case AccountWindowControllerAccountStateUnavailable:
+            self.accountUnavailable = YES;
+            self.shouldPresentRegistrationError = YES;
+            [self unregisterAccount];
+            break;
+    }
+}
+
+- (void)showRegistrarConnectionErrorSheetWithError:(NSString *)error {
+    NSAlert *alert = [[NSAlert alloc] init];
+    [alert setMessageText:[NSString stringWithFormat:
+                           NSLocalizedString(@"Could not register with %@.", @"Registrar connection error."),
+                           [[self account] registrar]]];
+    
+    if (error == nil) {
+        [alert setInformativeText:
+         [NSString stringWithFormat:
+          NSLocalizedString(@"Please check network connection and Registry Server settings.",
+                            @"Registrar connection error informative text."),
+          [[self account] registrar]]];
+    } else {
+        [alert setInformativeText:error];
+    }
+    
+    [DialPlanCoordinator.shared presentFailure:alert.informativeText];
+}
+
+
+- (void)showAvailableState {
+    [[NSNotificationCenter defaultCenter] postNotificationName:@"JPSAccountRoutingStateDidChangeNotification" object:self];
+}
+
+- (void)showUnavailableState {
+    [[NSNotificationCenter defaultCenter] postNotificationName:@"JPSAccountRoutingStateDidChangeNotification" object:self];
+}
+
+- (void)showOfflineState {
+    [[NSNotificationCenter defaultCenter] postNotificationName:@"JPSAccountRoutingStateDidChangeNotification" object:self];
+}
+
+- (void)showConnectingState {
+    [[NSNotificationCenter defaultCenter] postNotificationName:@"JPSAccountRoutingStateDidChangeNotification" object:self];
+}
+
+- (void)reRegistrationTimerTick:(NSTimer *)theTimer {
+    [self resumeRegistrationIfDesired];
+}
+
+- (void)invalidateReRegistrationTimer {
+    [self.reRegistrationTimer invalidate];
+    self.reRegistrationTimer = nil;
+}
+
+#pragma mark - AccountWindowControllerDelegate
+
+- (void)accountWindowController:(AccountWindowController *)controller didChangeAccountState:(AccountWindowControllerAccountState)state {
+    [self changeAccountState:state];
+}
+
+
+#pragma mark - AKSIPAccountDelegate
+
+// When account registration changes, make appropriate modifications to the UI. A call can also be made from here if
+// the user called from the Address Book or from the application URL handler.
+- (void)SIPAccountRegistrationDidChange:(AKSIPAccount *)account {
+    // The account can be not added if notification on the main thread was delivered after
+    // user agent had removed the account. Don't bother in that case.
+    if (![self isAccountAdded]) {
+        return;
+    }
+    
+    if (self.desiredAvailability == AccountWindowControllerAccountStateOffline) {
+        self.account.registered = NO;
+        [self showOfflineState];
+        return;
+    }
+    if ([[self account] isRegistered]) {
+        self.admittedPassword = nil;
+        [self invalidateReRegistrationTimer];
+
+        // If the account was offline and the user chose Unavailable state, -unregisterAccount will add the account
+        // to the user agent. User agent will register the account. Set the account to Unavailable (unregister it) here.
+        if (self.isAccountUnavailable || [self attemptingToUnregisterAccount]) {
+            [self unregisterAccount];
+            [self dispatchPendingRoutedCalls];
+            
+        } else {
+            [self setAccountUnavailable:NO];
+            [self showAvailableState];
+            [self dispatchPendingRoutedCalls];
+        }
+        
+    } else {
+        if (self.isAccountUnavailable) [self dispatchPendingRoutedCalls];
+        else [self cancelPendingRoutedCalls];
+        [self showUnavailableState];
+        
+        // Handle authentication failure
+        if ([[self account] registrationStatus] == PJSIP_SC_UNAUTHORIZED &&
+            [[self account] registrationErrorCode] == PJSIP_EFAILEDCREDENTIAL) {
+
+            NSString *admittedPassword = self.admittedPassword;
+            self.admittedPassword = nil;
+            [self.credentialBroker invalidateService:[NSString stringWithFormat:@"SIP: %@", account.registrar]
+                                            account:account.username];
+            [self.authenticationFailureController prepareWithUsername:account.username password:admittedPassword];
+            [DialPlanCoordinator.shared showDialler];
+            if (self.authenticationFailureController.window.sheetParent == nil && NSApp.mainWindow != nil) {
+                [NSApp.mainWindow beginSheet:self.authenticationFailureController.window completionHandler:nil];
+            }
+
+        } else if (([[self account] registrationStatus] / 100 != 2) &&
+                   ([[self account] registrationExpireTime] == kAKSIPAccountRegistrationExpireTimeNotSpecified)) {
+            // Raise a sheet if connection to the registrar failed. If last registration status is 2xx and expiration
+            // interval is not specified, it is unregistration, not failure. Condition of failure is: last registration
+            // status != 2xx AND expiration interval is not specified.
+            
+            if ([[self userAgent] isStarted]) {
+                if ([self shouldPresentRegistrationError]) {
+                    NSString *statusText = LocalizedStringForSIPResponseCode([[self account] registrationStatus])
+                        ?: [[self account] registrationStatusText];
+                    
+                    NSString *error;
+                    if (statusText == nil) {
+                        error = [NSString stringWithFormat:NSLocalizedString(@"Error %ld", @"Error #."),
+                                 [[self account] registrationStatus]];
+                        error = [error stringByAppendingString:@"."];
+                    } else {
+                        error = [NSString stringWithFormat:
+                                 NSLocalizedString(@"The error was: “%ld %@”.", @"Error description."),
+                                 [[self account] registrationStatus], statusText];
+                    }
+                    
+                    [self showRegistrarConnectionErrorSheetWithError:error];
+                    
+                } else {
+                    // Schedule account automatic re-registration timer.
+                    if ([self reRegistrationTimer] == nil) {
+                        NSTimeInterval reregistrationTimeInterval = (NSTimeInterval)[[self account] reregistrationTime];
+                        
+                        [self setReRegistrationTimer:
+                         [NSTimer scheduledTimerWithTimeInterval:reregistrationTimeInterval
+                                                          target:self
+                                                        selector:@selector(reRegistrationTimerTick:)
+                                                        userInfo:nil
+                                                         repeats:YES]];
+                    }
+                }
+            }
+        }
+    }
+    
+    [self setAttemptingToRegisterAccount:NO];
+    [self setAttemptingToUnregisterAccount:NO];
+    [self setShouldPresentRegistrationError:NO];
+}
+
+- (void)SIPAccountWillRemove:(AKSIPAccount *)account {
+    self.admittedPassword = nil;
+    [self invalidateReRegistrationTimer];
+}
+
+- (void)SIPAccount:(AKSIPAccount *)account didReceiveReplacementCall:(AKSIPCall *)call replacingIdentifier:(NSInteger)oldIdentifier {
+    if (call.canonicalDestination == nil) call.canonicalDestination = [self canonicalIncomingDestinationForURI:call.remoteURI];
+    CallController *controller = nil;
+    for (CallController *candidate in self.callControllers) {
+        if (candidate.call.identifier == oldIdentifier) { controller = candidate; break; }
+    }
+    if (controller == nil) {
+        controller = [[CallController alloc] initWithWindowNibName:@"Call" accountController:self
+                                                       userAgent:self.userAgent delegate:self];
+        [self.callControllers addObject:controller];
+    }
+    controller.call = call;
+    controller.canonicalDestination = call.canonicalDestination;
+    controller.callActive = YES;
+    AKSIPURIFormatter *formatter = [AKSIPURIFormatter new];
+    controller.displayedName = [formatter stringForObjectValue:call.remoteURI];
+    controller.title = call.remoteURI.SIPAddress;
+    controller.redialURI = call.remoteURI;
+    [controller showWindow:self];
+}
+
+- (NSString *)canonicalIncomingDestinationForURI:(AKSIPURI *)uri {
+    DialPlanNumber *number = [DialPlanStore.shared normaliseDestination:uri.user];
+    if (number.valid && ![number.kind isEqualToString:@"sip"]) return number.destination;
+    if (uri.host.length) {
+        AKSIPURI *address = [uri copy]; address.displayName = @"";
+        return address.description;
+    }
+    return number.valid ? number.destination : nil;
+}
+
+- (void)SIPAccount:(AKSIPAccount *)account didReceiveCall:(AKSIPCall *)aCall {
+    if (aCall.canonicalDestination == nil) {
+        aCall.canonicalDestination = [self canonicalIncomingDestinationForURI:aCall.remoteURI];
+    }
+    if (self.desiredAvailability == AccountWindowControllerAccountStateOffline || [self isAccountUnavailable]) {
+        // Reply with 480 Temporarily Unavailable if the user selected Unavailable account state.
+        [aCall replyWithTemporarilyUnavailable];
+        
+        return;
+        
+    } else if (![[NSUserDefaults standardUserDefaults] boolForKey:UserDefaultsKeys.callWaiting]) {
+        // Reply with 486 Busy Here if needed.
+        for (CallController *callController in [self callControllers]) {
+            if ([callController isCallActive]) {
+                [aCall replyWithBusyHere];
+                
+                return;
+            }
+        }
+    }
+    
+    CallController *aCallController = [[CallController alloc] initWithWindowNibName:@"Call"
+                                                                  accountController:self
+                                                                          userAgent:self.userAgent
+                                                                           delegate:self];
+    
+    [aCallController setCall:aCall];
+    aCallController.canonicalDestination = aCall.canonicalDestination;
+    [aCallController setCallActive:YES];
+    [[self callControllers] addObject:aCallController];
+    
+    AKSIPURIFormatter *SIPURIFormatter = [[AKSIPURIFormatter alloc] init];
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    [SIPURIFormatter setFormatsTelephoneNumbers:[defaults boolForKey:UserDefaultsKeys.formatTelephoneNumbers]];
+    [SIPURIFormatter setTelephoneNumberFormatterSplitsLastFourDigits:
+     [defaults boolForKey:UserDefaultsKeys.telephoneNumberFormatterSplitsLastFourDigits]];
+    
+    // These variables will be changed during the Address Book search if the record is found.
+    NSString *finalDisplayedName = [SIPURIFormatter stringForObjectValue:[aCall remoteURI]];
+    NSString *finalStatus = NSLocalizedString(@"calling",
+                                              @"John Smith calling. Somebody is calling us right "
+                                               "now. Call status string. Deliberately in lower case, "
+                                               "translators should do the same, if possible.");
+
+    // Search Address Book for caller's name.
+    
+    ABAddressBook *AB = [ABAddressBook sharedAddressBook];
+    NSArray *records = nil;
+    
+    ABSearchElement *SIPAddressMatch
+        = [ABPerson searchElementForProperty:kABEmailProperty
+                                       label:nil
+                                         key:nil
+                                       value:[[aCall  remoteURI] SIPAddress]
+                                  comparison:kABEqualCaseInsensitive];
+    
+    records = [AB recordsMatchingSearchElement:SIPAddressMatch];
+    
+    if ([records count] > 0) {
+        id theRecord = records[0];
+        
+        finalDisplayedName = [theRecord ak_fullName];
+        [aCallController setNameFromAddressBook:[theRecord ak_fullName]];
+        
+        NSString *localizedLabel = [AB ak_localizedLabel:kEmailSIPLabel];
+        finalStatus = localizedLabel;
+        [aCallController setPhoneLabelFromAddressBook:localizedLabel];
+
+    } else if ([[[aCall remoteURI] displayName] ak_isTelephoneNumber] ||
+               ([[[aCall remoteURI] displayName] length] == 0 &&
+                [[[aCall remoteURI] user] ak_isTelephoneNumber]))
+    {  // No SIP Address found, search for the phone number.
+        NSString *phoneNumberToSearch;
+        if ([[[aCall remoteURI] displayName] length] > 0) {
+            phoneNumberToSearch = [[aCall remoteURI] displayName];
+        } else {
+            phoneNumberToSearch = [[aCall remoteURI] user];
+        }
+        
+        BOOL recordFound = NO;
+        
+        // Look for the whole phone number match first.
+        ABSearchElement *phoneNumberMatch
+            = [ABPerson searchElementForProperty:kABPhoneProperty
+                                           label:nil
+                                             key:nil
+                                           value:phoneNumberToSearch
+                                      comparison:kABEqual];
+        
+        records = [AB recordsMatchingSearchElement:phoneNumberMatch];
+        if ([records count] > 0) {
+            recordFound = YES;
+            id theRecord = records[0];
+            finalDisplayedName = [theRecord ak_fullName];
+            [aCallController setNameFromAddressBook:[theRecord ak_fullName]];
+            
+            // Find the exact phone number match.
+            ABMultiValue *phones = [theRecord valueForProperty:kABPhoneProperty];
+            for (NSUInteger i = 0; i < [phones count]; ++i) {
+                if ([[phones valueAtIndex:i] isEqualToString:phoneNumberToSearch]) {
+                    NSString *localizedLabel = [AB ak_localizedLabel:[phones labelAtIndex:i]];
+                    finalStatus = localizedLabel;
+                    [aCallController setPhoneLabelFromAddressBook:localizedLabel];
+                    break;
+                }
+            }
+        }
+        
+        NSUInteger significantPhoneNumberLength = [defaults integerForKey:UserDefaultsKeys.significantPhoneNumberLength];
+        
+        // Get the significant phone suffix if the phone number length is greater
+        // than we defined.
+        NSString *significantPhoneSuffix;
+        if ([phoneNumberToSearch length] >= significantPhoneNumberLength) {
+            significantPhoneSuffix = [phoneNumberToSearch substringFromIndex:
+                                      ([phoneNumberToSearch length] - significantPhoneNumberLength)];
+            
+            // If the the record hasn't been found with the whole number, look for
+            // significant suffix match.
+            if (!recordFound) {
+                ABSearchElement *phoneNumberSuffixMatch
+                    = [ABPerson searchElementForProperty:kABPhoneProperty
+                                                   label:nil
+                                                     key:nil
+                                                   value:significantPhoneSuffix
+                                              comparison:kABSuffixMatch];
+                
+                records = [AB recordsMatchingSearchElement:phoneNumberSuffixMatch];
+                if ([records count] > 0) {
+                    recordFound = YES;
+                    id theRecord = records[0];
+                    finalDisplayedName = [theRecord ak_fullName];
+                    [aCallController setNameFromAddressBook:[theRecord ak_fullName]];
+                    
+                    // Find the exact phone number match.
+                    ABMultiValue *phones = [theRecord valueForProperty:kABPhoneProperty];
+                    for (NSUInteger i = 0; i < [phones count]; ++i) {
+                        if ([[phones valueAtIndex:i] hasSuffix:significantPhoneSuffix]) {
+                            NSString *localizedLabel = [AB ak_localizedLabel:[phones labelAtIndex:i]];
+                            finalStatus = localizedLabel;
+                            [aCallController setPhoneLabelFromAddressBook:localizedLabel];
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        
+        // If still not found, search phone numbers that contain spaces, dashes, etc.
+        if (!recordFound) {
+            NSArray *allPeople = [AB people];
+            
+            AKTelephoneNumberFormatter *telephoneNumberFormatter = [[AKTelephoneNumberFormatter alloc] init];
+            for (id theRecord in allPeople) {
+                ABMultiValue *phones = [theRecord valueForProperty:kABPhoneProperty];
+                
+                for (NSUInteger i = 0; i < [phones count]; ++i) {
+                    NSString *phoneNumber = [phones valueAtIndex:i];
+                    
+                    // Don't bother if the phone number contains only contiguous
+                    // digits, we should have covered such numbers in previous search.
+                    if ([phoneNumber ak_isTelephoneNumber]) {
+                        continue;
+                    }
+                    
+                    // Don't bother if the phone number has letters.
+                    if ([phoneNumber ak_hasLetters]) {
+                        continue;
+                    }
+                    
+                    // Here phone number probably includes spaces or other dividers.
+                    // Scan valid phone characters to compare with a given string.
+                    NSString *scannedPhoneNumber = [telephoneNumberFormatter telephoneNumberFromString:phoneNumber];
+                    if (scannedPhoneNumber == nil) {
+                        continue;
+                    }
+                    if ([scannedPhoneNumber isEqualToString:phoneNumberToSearch]) {
+                        recordFound = YES;
+                    } else if (([phoneNumberToSearch length] >= significantPhoneNumberLength) &&
+                               [scannedPhoneNumber hasSuffix:significantPhoneSuffix]) {
+                        
+                        recordFound = YES;
+                    }
+                    
+                    if (recordFound) {
+                        NSString *localizedLabel = [AB ak_localizedLabel:[phones labelAtIndex:i]];
+                        finalStatus = localizedLabel;
+                        [aCallController setPhoneLabelFromAddressBook:localizedLabel];
+                        break;
+                    }
+                }
+                
+                if (recordFound) {
+                    finalDisplayedName = [theRecord ak_fullName];
+                    [aCallController setNameFromAddressBook:[theRecord ak_fullName]];
+                    break;
+                }
+            }
+        }
+    }
+    
+    // Address Book search ends here.
+    
+    [aCallController setTitle:([[aCall remoteURI] SIPAddress] ?: @"")];
+    [aCallController setDisplayedName:finalDisplayedName];
+    [aCallController setStatus:finalStatus];
+    [aCallController setRedialURI:[aCall remoteURI]];
+    
+    [aCallController showIncomingCallView];
+    
+    [aCallController showWindow:nil];
+    
+    // Show user notification.
+    NSString *callSource;
+    AKTelephoneNumberFormatter *telephoneNumberFormatter = [[AKTelephoneNumberFormatter alloc] init];
+    [telephoneNumberFormatter setSplitsLastFourDigits:
+     [defaults boolForKey:UserDefaultsKeys.telephoneNumberFormatterSplitsLastFourDigits]];
+    if ([[aCallController phoneLabelFromAddressBook] length] > 0) {
+        callSource = [aCallController phoneLabelFromAddressBook];
+    } else if ([[[aCall remoteURI] user] length] > 0) {
+        if ([[[aCall remoteURI] user] ak_isTelephoneNumber]) {
+            if ([defaults boolForKey:UserDefaultsKeys.formatTelephoneNumbers]) {
+                callSource = [telephoneNumberFormatter stringForObjectValue:[[aCall remoteURI] user]];
+            } else {
+                callSource = [[aCall remoteURI] user];
+            }
+        } else {
+            callSource = [[aCall remoteURI] SIPAddress];
+        }
+    } else {
+        callSource = [[aCall remoteURI] host];
+    }
+    
+    NSString *notificationTitle, *notificationDescription;
+    if ([[aCallController nameFromAddressBook] length] > 0) {
+        notificationTitle = [aCallController nameFromAddressBook];
+        notificationDescription = callSource;
+        
+    } else if ([[[aCall remoteURI] displayName] length] > 0) {
+        notificationTitle = [[aCall remoteURI] displayName];
+        notificationDescription
+            = [NSString stringWithFormat:
+               NSLocalizedString(@"calling from %@",
+                                 @"John Smith calling from 1234567. "
+                                  "Somebody is calling us right now from some source. "
+                                  "User notification description. Deliberately in "
+                                  "lower case, translators should do the same, if "
+                                  "possible."),
+               callSource];
+    } else {
+        notificationTitle = callSource;
+        notificationDescription
+            = NSLocalizedString(@"calling",
+                                @"John Smith calling. Somebody is calling us right "
+                                 "now. User notification description. "
+                                 "Deliberately in lower case, translators should do "
+                                 "the same, if possible.");
+    }
+    
+    NSUserNotification *userNotification = [[NSUserNotification alloc] init];
+    userNotification.identifier = aCallController.identifier;
+    userNotification.title = notificationTitle;
+    userNotification.informativeText = notificationDescription;
+    userNotification.actionButtonTitle = NSLocalizedString(@"Answer", @"Call answer button.");
+    NSString *decline = NSLocalizedString(@"Decline", @"Call decline button.");
+    userNotification.additionalActions = @[[NSUserNotificationAction actionWithIdentifier:@"decline" title:decline]];
+    [[NSUserNotificationCenter defaultUserNotificationCenter] deliverNotification:userNotification];
+
+    [self startPlayingRingtoneOrLogError];
+    
+    [aCall sendRingingNotification];
+}
+
+- (void)startPlayingRingtoneOrLogError {
+    NSError *error;
+    BOOL success = [self.ringtonePlayback startAndReturnError:&error];
+    if (!success) {
+        NSLog(@"Could not start playing ringtone: %@", error);
+    }
+}
+
+
+#pragma mark - CallControllerDelegate
+
+- (void)callControllerWillClose:(CallController *)callController {
+    [self.callControllers removeObject:callController];
+    [(AppController *)[NSApp delegate] updateDockTileBadgeLabel];
+}
+
+
+#pragma mark - AKSIPUserAgent notifications
+
+- (void)SIPUserAgentDidFinishStarting:(NSNotification *)notification {
+    if (![[notification object] isStarted]) {
+        [self cancelPendingRoutedCalls];
+        [self showOfflineState];
+        
+        return;
+    }
+    
+    if ([self attemptingToRegisterAccount]) {
+        [self resumeRegistrationIfDesired];
+    } else if ([self attemptingToUnregisterAccount]) {
+        [self unregisterAccount];
+    }
+}
+
+
+#pragma mark - AKNetworkReachability notifications
+
+// This is the moment when the application starts doing its main job.
+- (void)networkReachabilityDidBecomeReachable:(NSNotification *)notification {
+    if (!self.sleepStatus.isSleeping && !self.isAccountUnavailable && !self.isAccountRegistered) {
+        [self resumeRegistrationIfDesired];
+    }
+}
+
+@end

@@ -1,0 +1,1337 @@
+//
+//  AppController.m
+//  Telephone
+//
+//  Copyright © 2008-2016 Alexey Kuznetsov
+//  Copyright © 2016-2022 64 Characters
+//
+//  Telephone is free software: you can redistribute it and/or modify
+//  it under the terms of the GNU General Public License as published by
+//  the Free Software Foundation, either version 3 of the License, or
+//  (at your option) any later version.
+//
+//  Telephone is distributed in the hope that it will be useful,
+//  but WITHOUT ANY WARRANTY; without even the implied warranty of
+//  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+//  GNU General Public License for more details.
+//
+
+#import "AppController.h"
+
+@import UseCases;
+
+#import "AKNetworkReachability.h"
+#import "AKKeychain.h"
+#import "AKNSString+Scanning.h"
+#import "AKSIPAccount.h"
+#import "AKSIPCall.h"
+#import "AKStereoRecording.h"
+#import "AKRecordingCatalogue.h"
+#import "RecordingRecoveryController.h"
+
+#import "AccountController.h"
+#import "AccountControllers.h"
+#import "AccountPreferencesViewController.h"
+#import "AccountSetupController.h"
+#import "ActiveAccountViewController.h"
+#import "AuthenticationFailureController.h"
+#import "CallController.h"
+#import "NameServers.h"
+#import "PreferencesController.h"
+#import "SharedDialerController.h"
+
+#import "Telephone-Swift.h"
+
+NS_ASSUME_NONNULL_BEGIN
+
+// Presentation guidance only. Native driver work is never timed out or cancelled.
+static const NSTimeInterval AKAudioRecoverySlowInterval = 5.0;
+
+@interface AppController () <AKSIPUserAgentDelegate, NSUserNotificationCenterDelegate, NSMenuItemValidation, NameServersChangeEventTarget, PreferencesControllerDelegate>
+
+@property(nonatomic, readonly) AKSIPUserAgent *userAgent;
+@property(nonatomic, readonly) AccountControllers *accountControllers;
+@property(nonatomic, readonly) AccountSetupController *accountSetupController;
+@property(nonatomic) BOOL shouldRegisterAllAccounts;
+@property(nonatomic) BOOL shouldRestartUserAgentASAP;
+@property(nonatomic) BOOL pendingNetworkRestart;
+@property(nonatomic, getter=isTerminating) BOOL terminating;
+@property(nonatomic) BOOL waitingForRecordingFinalizations;
+@property(nonatomic) BOOL terminationReplySent;
+@property(nonatomic) NSUInteger terminationGeneration;
+@property(nonatomic) BOOL shouldPresentUserAgentLaunchError;
+@property(nonatomic) BOOL hasPresentedAudioFailure;
+@property(nonatomic, nullable) NSAlert *audioFailureAlert;
+@property(nonatomic, nullable) NSMenuItem *retryAudioMenuItem;
+@property(nonatomic, nullable) NSView *audioRecoveryProgressView;
+@property(nonatomic, nullable) NSProgressIndicator *audioRecoveryProgressIndicator;
+@property(nonatomic, nullable) NSTextField *audioRecoveryProgressLabel;
+@property(nonatomic, nullable) id audioRecoveryWatchdog;
+@property(nonatomic, weak, nullable) AKSIPUserAgent *audioRecoveryAgent;
+@property(nonatomic) NSUInteger audioRecoveryGeneration;
+@property(nonatomic) NSUInteger audioRecoveryRevision;
+@property(nonatomic) NSTimeInterval audioRecoveryStartedAt;
+@property(nonatomic) BOOL audioRecoveryOperationPending;
+@property(nonatomic) BOOL audioRecoveryOperationBeganFailed;
+@property(nonatomic) BOOL audioRecoveryIsSlow;
+@property(nonatomic) BOOL audioRecoveryDidRecover;
+@property(nonatomic, nullable) NSMenuItem *recordingRecoveryMenuItem;
+@property(nonatomic) RecordingRecoveryController *recordingRecoveryController;
+@property(nonatomic, nullable) AKRecordingCatalogue *recordingCatalogue;
+@property(nonatomic, nullable) RecordingHistoryActions *recordingHistoryActions;
+@property(atomic, nullable) NSError *recordingAttachmentError;
+@property(nonatomic) BOOL presentingHistoryError;
+@property(nonatomic) AccountsMenuItems *accountsMenuItems;
+@property(nonatomic) SharedDialerController *sharedDialler;
+@property(nonatomic, weak) IBOutlet NSMenu *windowMenu;
+@property(nonatomic, weak) IBOutlet NSMenuItem *preferencesMenuItem;
+@property(nonatomic, weak) IBOutlet HelpMenuActionRedirect *helpMenuActionRedirect;
+
+@property(nonatomic, readonly) CompositionRoot *compositionRoot;
+@property(nonatomic, readonly) PreferencesController *preferencesController;
+@property(nonatomic, readonly) LocalBuildInformationWindowPresenter *localBuildInformationPresenter;
+@property(nonatomic, readonly) id<RingtonePlaybackUseCase> ringtonePlayback;
+@property(nonatomic, readonly) id<UseCase> userAgentStart;
+@property(nonatomic, readonly) WorkspaceSleepStatus *sleepStatus;
+@property(nonatomic, readonly) AsyncCallHistoryViewEventTargetFactory *callHistoryViewEventTargetFactory;
+@property(nonatomic, getter=isFinishedLaunching) BOOL finishedLaunching;
+@property(nonatomic, copy) NSString *destinationToCall;
+@property(nonatomic, getter=isUserSessionActive) BOOL userSessionActive;
+@property(nonatomic, readonly, nullable) NameServers *nameServers;
+
+- (void)finishTerminationAfterRecordings;
+- (void)finishTerminationAfterRecoveryScan;
+- (void)refreshRecordingRecoveryJobsWithCompletion:(void (^)(BOOL, NSArray *, NSError * _Nullable))completion;
+- (void)updateRecordingRecoveryMenuItem;
+- (BOOL)confirmQuitWithRecordingRecoveryError:(NSError *)error;
+- (void)configureRecordingAttachmentsWithCatalogue:(AKRecordingCatalogue *)catalogue;
+- (void)refreshRecordingAttachmentsWithCompletion:(void (^)(NSError * _Nullable))completion;
+- (void)reconcileRecordingAttachmentsWithCompletion:(void (^)(BOOL, NSError * _Nullable))completion;
+
+@end
+
+NS_ASSUME_NONNULL_END
+
+
+@implementation AppController
+
+@synthesize accountSetupController = _accountSetupController;
+@synthesize terminating = _terminating;
+@synthesize recordingRecoveryController = _recordingRecoveryController;
+
+- (RecordingRecoveryController *)recordingRecoveryController {
+    if (_recordingRecoveryController == nil) {
+        __weak AppController *weakSelf = self;
+        _recordingRecoveryController = [[RecordingRecoveryController alloc] initWithLoader:^NSArray *(NSError **error) {
+            NSError *attachmentError = weakSelf.recordingAttachmentError;
+            if (attachmentError != nil) { if (error) *error = attachmentError; return nil; }
+            return AKPendingRecordingRecoveryJobsWithError(error);
+        }];
+        _recordingRecoveryController.actionsEnabled = !self.isTerminating;
+        _recordingRecoveryController.stateDidChange = ^{ [weakSelf updateRecordingRecoveryMenuItem]; };
+    }
+    return _recordingRecoveryController;
+}
+
+- (void)updateRecordingRecoveryMenuItem {
+    if (self.recordingRecoveryMenuItem == nil) return;
+    NSUInteger count = self.recordingRecoveryController.managedJobCount;
+    self.recordingRecoveryMenuItem.title = count > 0
+        ? [NSString stringWithFormat:NSLocalizedString(@"Recover Recordings… (%lu)", @"Recovery menu with eligible recording count."), (unsigned long)count]
+        : NSLocalizedString(@"Recover Recordings…", @"Recording recovery menu.");
+}
+
+- (AccountSetupController *)accountSetupController {
+    if (_accountSetupController == nil) {
+        _accountSetupController = [[AccountSetupController alloc] init];
+    }
+    return _accountSetupController;
+}
+
+- (instancetype)init {
+    self = [super init];
+    if (self == nil) {
+        return nil;
+    }
+
+    _compositionRoot = [[CompositionRoot alloc] initWithPreferencesControllerDelegate:self
+                                                         nameServersChangeEventTarget:self
+                                                         ];
+    
+    _userAgent = _compositionRoot.userAgent;
+    [[self userAgent] setDelegate:self];
+    _preferencesController = _compositionRoot.preferencesController;
+    _localBuildInformationPresenter = _compositionRoot.localBuildInformationPresenter;
+    _ringtonePlayback = _compositionRoot.ringtonePlayback;
+    _userAgentStart = _compositionRoot.userAgentStart;
+    _sleepStatus = _compositionRoot.workstationSleepStatus;
+    _callHistoryViewEventTargetFactory = _compositionRoot.callHistoryViewEventTargetFactory;
+    _destinationToCall = @"";
+    _userSessionActive = YES;
+    _accountControllers = _compositionRoot.accountControllers;
+    DialPlanCoordinator.shared.controllers = _accountControllers;
+    __weak AppController *weakSelf = self;
+    DialPlanCoordinator.shared.canAcceptCallsHandler = ^BOOL{ return weakSelf != nil && !weakSelf.isTerminating && NSApp.modalWindow == nil; };
+    DialPlanCoordinator.shared.showDiallerHandler = ^{ [weakSelf showSharedDialler]; };
+    DialPlanCoordinator.shared.errorHandler = ^(NSString *message) { [weakSelf ensureSharedDialler]; [weakSelf.sharedDialler presentFailure:message]; };
+    DialPlanCoordinator.shared.startBackendHandler = ^{
+        if (!weakSelf.isTerminating && weakSelf.userAgent.state == AKSIPUserAgentStateStopped) [weakSelf.userAgentStart execute];
+    };
+    _preferencesController.dialPlanStore = DialPlanCoordinator.shared.store;
+    _preferencesController.dialPlanAccountProvider = ^NSArray *{ return [DialPlanCoordinator.shared accountSnapshots]; };
+
+    _nameServers = _compositionRoot.nameServers;
+    NSNotificationCenter *notificationCenter = [NSNotificationCenter defaultCenter];
+    [notificationCenter addObserver:self selector:@selector(recordingExportDidFail:)
+                               name:AKRecordingExportDidFailNotification object:nil];
+    [notificationCenter addObserver:self selector:@selector(callHistoryPersistenceDidFail:)
+                               name:@"AKCallHistoryPersistenceDidFailNotification" object:nil];
+
+    if (_userAgent != nil) {
+        [notificationCenter addObserver:self
+                               selector:@selector(SIPUserAgentAudioStateDidChange:)
+                                   name:AKSIPUserAgentAudioStateDidChangeNotification
+                                 object:_userAgent];
+    }
+    [notificationCenter addObserver:self
+                           selector:@selector(accountSetupControllerDidAddAccount:)
+                               name:AKAccountSetupControllerDidAddAccountNotification
+                             object:nil];
+    [notificationCenter addObserver:self
+                           selector:@selector(SIPCallCalling:)
+                               name:AKSIPCallCallingNotification
+                             object:nil];
+    [notificationCenter addObserver:self
+                           selector:@selector(SIPCallIncoming:)
+                               name:AKSIPCallIncomingNotification
+                             object:nil];
+    [notificationCenter addObserver:self
+                           selector:@selector(SIPCallConnecting:)
+                               name:AKSIPCallConnectingNotification
+                             object:nil];
+    [notificationCenter addObserver:self
+                           selector:@selector(SIPCallDidDisconnect:)
+                               name:AKSIPCallDidDisconnectNotification
+                             object:nil];
+    [notificationCenter addObserver:self
+                           selector:@selector(authenticationFailureControllerDidChangeUsernameAndPassword:)
+                               name:AKAuthenticationFailureControllerDidChangeUsernameAndPasswordNotification
+                             object:nil];
+    
+    notificationCenter = [[NSWorkspace sharedWorkspace] notificationCenter];
+    [notificationCenter addObserver:self
+                           selector:@selector(workspaceWillSleep:)
+                               name:NSWorkspaceWillSleepNotification
+                             object:nil];
+    [notificationCenter addObserver:self
+                           selector:@selector(workspaceDidWake:)
+                               name:NSWorkspaceDidWakeNotification
+                             object:nil];
+    [notificationCenter addObserver:self
+                           selector:@selector(workspaceSessionDidResignActive:)
+                               name:NSWorkspaceSessionDidResignActiveNotification
+                             object:nil];
+    [notificationCenter addObserver:self
+                           selector:@selector(workspaceSessionDidBecomeActive:)
+                               name:NSWorkspaceSessionDidBecomeActiveNotification
+                             object:nil];
+    
+    [[NSAppleEventManager sharedAppleEventManager] setEventHandler:self
+                                                       andSelector:@selector(handleGetURLEvent:withReplyEvent:)
+                                                     forEventClass:kInternetEventClass
+                                                        andEventID:kAEGetURL];
+    
+    return self;
+}
+
+- (void)dealloc {
+    [self.audioRecoveryWatchdog invalidate];
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
+    [[[NSWorkspace sharedWorkspace] notificationCenter] removeObserver:self];
+    [[NSDistributedNotificationCenter defaultCenter] removeObserver:self];
+}
+
+- (void)stopUserAgent {
+    [self.accountControllers hangUpCallsAndRemoveAccountsFromUserAgent];
+    [self.userAgent stop];
+}
+
+- (void)stopUserAgentAndWait {
+    [self.accountControllers hangUpCallsAndRemoveAccountsFromUserAgent];
+    [self.userAgent stopAndWait];
+}
+
+- (void)restartUserAgent {
+    if ([[self userAgent] isStarted]) {
+        [self setShouldRegisterAllAccounts:YES];
+        [self stopUserAgent];
+    } else if (self.userAgent.state == AKSIPUserAgentStateStarting || self.userAgent.state == AKSIPUserAgentStateStopping) {
+        self.pendingNetworkRestart = YES;
+        self.shouldRegisterAllAccounts = YES;
+    }
+}
+
+- (void)restartUserAgentAfterDelayOrMarkForRestart {
+    if (!self.accountControllers.haveActiveCallControllers) {
+        [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(restartUserAgent) object:nil];
+        [self performSelector:@selector(restartUserAgent) withObject:nil afterDelay:3.0];
+    } else {
+        self.shouldRestartUserAgentASAP = YES;
+    }
+}
+
+- (IBAction)showLocalBuildInformation:(id)sender {
+    [self.localBuildInformationPresenter present];
+}
+
+- (void)bootstrapDefaultRouteIfNeeded {
+    [DialPlanStore.shared bootstrapDefaultAccountUUID:self.accountControllers.enabled.firstObject.account.uuid ?: @""];
+}
+
+- (void)ensureSharedDialler {
+    if (self.sharedDialler == nil) {
+        self.sharedDialler = [[SharedDialerController alloc] initWithAccounts:self.accountControllers historyFactory:self.callHistoryViewEventTargetFactory];
+        self.sharedDialler.contactCompletions = self.compositionRoot.diallerContacts;
+    }
+}
+
+- (void)showSharedDialler {
+    [self ensureSharedDialler];
+    [self.sharedDialler showWindow:self];
+}
+
+- (IBAction)showGuidedRoutes:(id)sender {
+    [self.preferencesController showWindowCentered];
+    [self.preferencesController showDialPlan];
+}
+
+- (IBAction)showPreferencePanel:(id)sender {
+    [self.preferencesController showWindowCentered];
+}
+
+- (void)installAudioRecoveryMenuItem {
+    if (self.retryAudioMenuItem != nil) {
+        return;
+    }
+    NSMenu *menu = self.preferencesMenuItem.menu;
+    if (menu == nil) {
+        return;
+    }
+    NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:NSLocalizedString(@"Retry Audio", @"Explicit audio recovery action.")
+                                               action:@selector(retryAudio:)
+                                        keyEquivalent:@""];
+    item.target = self;
+    [menu insertItem:item atIndex:[menu indexOfItem:self.preferencesMenuItem] + 1];
+    self.retryAudioMenuItem = item;
+    [self updateAudioRecoveryMenuItem];
+}
+
+// These small seams keep presentation timing testable without native devices,
+// sleeping, real preferences, or a second audio retry path.
+- (NSTimeInterval)monotonicAudioRecoveryTime { return NSProcessInfo.processInfo.systemUptime; }
+
+- (id)scheduleAudioRecoveryWatchdogAfter:(NSTimeInterval)delay action:(dispatch_block_t)action {
+    NSTimer *timer = [NSTimer timerWithTimeInterval:MAX(0.01, delay) repeats:NO block:^(NSTimer *unused) { action(); }];
+    [NSRunLoop.mainRunLoop addTimer:timer forMode:NSRunLoopCommonModes];
+    return timer;
+}
+
+- (void)invalidateAudioRecoveryWatchdog {
+    [self.audioRecoveryWatchdog invalidate];
+    self.audioRecoveryWatchdog = nil;
+}
+
+- (void)setTerminating:(BOOL)terminating {
+    if (_terminating != terminating) {
+        self.terminationGeneration++;
+        [self.compositionRoot setContactCompletionSuspended:terminating];
+    }
+    _terminating = terminating;
+    if ([self.accountControllers respondsToSelector:@selector(setCredentialAccessSuspended:)]) {
+        [self.accountControllers setCredentialAccessSuspended:terminating || self.sleepStatus.isSleeping || !self.isUserSessionActive];
+    }
+    if (terminating) [AKCredentialBroker.sharedBroker invalidateAll];
+    _recordingRecoveryController.actionsEnabled = !terminating;
+    _recordingHistoryActions.actionsEnabled = !terminating;
+    if (!terminating) return;
+    [self invalidateAudioRecoveryWatchdog];
+    if (self.retryAudioMenuItem != nil) {
+        [self updateAudioRecoveryMenuItem];
+    } else {
+        // Quitting before the menu exists must not initialise presentation or
+        // require audio collaborators merely to stop an inactive watchdog.
+        self.audioRecoveryAgent = nil;
+        self.audioRecoveryOperationPending = NO;
+        self.audioRecoveryOperationBeganFailed = NO;
+        self.audioRecoveryIsSlow = NO;
+        self.audioRecoveryDidRecover = NO;
+        [self.audioRecoveryProgressIndicator stopAnimation:nil];
+    }
+}
+
+- (BOOL)audioRecoveryIdentityMatchesAgent:(AKSIPUserAgent *)agent generation:(NSUInteger)generation revision:(NSUInteger)revision {
+    return self.audioRecoveryAgent == agent && self.audioRecoveryGeneration == generation && self.audioRecoveryRevision == revision;
+}
+
+- (void)scheduleAudioRecoveryWatchdogForAgent:(AKSIPUserAgent *)agent after:(NSTimeInterval)delay {
+    NSUInteger generation = self.audioRecoveryGeneration, revision = self.audioRecoveryRevision;
+    __weak AppController *weakSelf = self;
+    __weak AKSIPUserAgent *weakAgent = agent;
+    self.audioRecoveryWatchdog = [self scheduleAudioRecoveryWatchdogAfter:delay action:^{
+        AppController *controller = weakSelf;
+        AKSIPUserAgent *currentAgent = weakAgent;
+        if (controller == nil || currentAgent == nil ||
+            ![controller audioRecoveryIdentityMatchesAgent:currentAgent generation:generation revision:revision] ||
+            controller.userAgent != currentAgent || !controller.audioRecoveryOperationPending) return;
+        if (controller.isTerminating || !currentAgent.isStarted || !currentAgent.audioCommandPending ||
+            currentAgent.audioGeneration != generation || currentAgent.audioSelectionRevision != revision) {
+            [controller updateAudioRecoveryMenuItem];
+            return;
+        }
+        controller.audioRecoveryWatchdog = nil;
+        NSTimeInterval elapsed = MAX(0, [controller monotonicAudioRecoveryTime] - controller.audioRecoveryStartedAt);
+        if (elapsed < AKAudioRecoverySlowInterval) {
+            // Run-loop timers are best effort; recheck monotonic elapsed time.
+            [controller scheduleAudioRecoveryWatchdogForAgent:currentAgent after:AKAudioRecoverySlowInterval - elapsed];
+            return;
+        }
+        controller.audioRecoveryIsSlow = YES;
+        [controller updateAudioRecoveryMenuItem];
+    }];
+}
+
+- (void)installAudioRecoveryProgressViewIfNeeded {
+    if (self.audioRecoveryProgressView != nil) return;
+    NSView *view = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 300, 24)];
+    view.identifier = @"AudioRecoveryProgress";
+    NSProgressIndicator *indicator = [[NSProgressIndicator alloc] initWithFrame:NSMakeRect(12, 4, 16, 16)];
+    indicator.style = NSProgressIndicatorStyleSpinning;
+    indicator.indeterminate = YES;
+    indicator.displayedWhenStopped = NO;
+    indicator.controlSize = NSControlSizeSmall;
+    indicator.accessibilityLabel = NSLocalizedString(@"Audio operation in progress", @"Indeterminate audio recovery progress purpose.");
+    NSTextField *label = [NSTextField labelWithString:@""];
+    label.frame = NSMakeRect(36, 3, 252, 18);
+    label.font = [NSFont menuFontOfSize:0];
+    label.lineBreakMode = NSLineBreakByTruncatingTail;
+    [view addSubview:indicator];
+    [view addSubview:label];
+    self.audioRecoveryProgressView = view;
+    self.audioRecoveryProgressIndicator = indicator;
+    self.audioRecoveryProgressLabel = label;
+}
+
+- (void)updateAudioRecoveryMenuItem {
+    AKSIPUserAgent *agent = self.userAgent;
+    BOOL started = agent.isStarted && !self.isTerminating;
+    BOOL pending = started && agent.audioCommandPending;
+    BOOL sameIdentity = [self audioRecoveryIdentityMatchesAgent:agent generation:agent.audioGeneration revision:agent.audioSelectionRevision];
+    if (!sameIdentity || !started) {
+        [self invalidateAudioRecoveryWatchdog];
+        self.audioRecoveryAgent = started ? agent : nil;
+        self.audioRecoveryGeneration = agent.audioGeneration;
+        self.audioRecoveryRevision = agent.audioSelectionRevision;
+        self.audioRecoveryOperationPending = NO;
+        self.audioRecoveryOperationBeganFailed = NO;
+        self.audioRecoveryIsSlow = NO;
+        self.audioRecoveryDidRecover = NO;
+    }
+    if (pending && !self.audioRecoveryOperationPending) {
+        self.audioRecoveryOperationPending = YES;
+        self.audioRecoveryOperationBeganFailed = agent.hasAudioFailure;
+        self.audioRecoveryStartedAt = [self monotonicAudioRecoveryTime];
+        self.audioRecoveryIsSlow = NO;
+        self.audioRecoveryDidRecover = NO;
+        [self scheduleAudioRecoveryWatchdogForAgent:agent after:AKAudioRecoverySlowInterval];
+    } else if (!pending && self.audioRecoveryOperationPending) {
+        self.audioRecoveryDidRecover = started && sameIdentity && self.audioRecoveryOperationBeganFailed && !agent.hasAudioFailure;
+        self.audioRecoveryOperationPending = NO;
+        self.audioRecoveryIsSlow = NO;
+        [self invalidateAudioRecoveryWatchdog];
+    }
+    if (agent.hasAudioFailure) self.audioRecoveryDidRecover = NO;
+
+    NSString *title;
+    NSString *guidance;
+    if (pending) {
+        title = self.audioRecoveryIsSlow
+            ? NSLocalizedString(@"Audio is taking longer…", @"Audio operation remains pending after five seconds.")
+            : NSLocalizedString(@"Trying audio…", @"Selected audio devices are being opened.");
+        guidance = self.audioRecoveryIsSlow
+            ? NSLocalizedString(@"Audio has taken longer than 5 seconds and is still running. Telephone has not cancelled it and will not retry automatically. Retry Audio is available only after it finishes.", @"Slow audio operation guidance without a native timeout claim.")
+            : NSLocalizedString(@"Telephone is trying the selected audio devices. Your call may still be connected. Wait for this operation to finish; Telephone will not retry automatically.", @"Pending audio operation guidance.");
+        [self installAudioRecoveryProgressViewIfNeeded];
+        self.audioRecoveryProgressLabel.stringValue = title;
+        self.audioRecoveryProgressLabel.accessibilityLabel = title;
+        self.audioRecoveryProgressLabel.accessibilityHelp = guidance;
+        self.audioRecoveryProgressView.accessibilityHelp = guidance;
+        self.audioRecoveryProgressView.toolTip = guidance;
+        [self.audioRecoveryProgressIndicator startAnimation:nil];
+        self.retryAudioMenuItem.view = self.audioRecoveryProgressView;
+    } else {
+        [self.audioRecoveryProgressIndicator stopAnimation:nil];
+        self.retryAudioMenuItem.view = nil;
+        title = agent.hasAudioFailure
+            ? NSLocalizedString(@"Audio unavailable: Retry Audio", @"Persistent audio failure and recovery menu item.")
+            : self.audioRecoveryDidRecover
+                ? NSLocalizedString(@"Audio recovered", @"Observed failed audio operation completed successfully.")
+                : NSLocalizedString(@"Retry Audio", @"Explicit audio recovery action.");
+        guidance = agent.hasAudioFailure
+            ? NSLocalizedString(@"Your call may still be connected. Choose devices in Sound Settings, then use Retry Audio. If microphone access is denied, allow Telephone in System Settings > Privacy & Security > Microphone. Telephone will not retry automatically.", @"Audio failure recovery and microphone privacy guidance.")
+            : self.audioRecoveryDidRecover
+                ? NSLocalizedString(@"The selected audio operation completed successfully. Telephone did not retry automatically.", @"Completed explicit audio recovery guidance.")
+                : NSLocalizedString(@"Retry Audio is available after an audio failure.", @"Availability of explicit audio recovery.");
+    }
+    self.retryAudioMenuItem.title = title;
+    self.retryAudioMenuItem.accessibilityLabel = title;
+    self.retryAudioMenuItem.accessibilityHelp = guidance;
+    self.retryAudioMenuItem.toolTip = guidance;
+    self.retryAudioMenuItem.enabled = agent.hasAudioFailure && started && !pending;
+}
+
+- (IBAction)retryAudio:(id)sender {
+    if (!self.userAgent.hasAudioFailure || !self.userAgent.isStarted || self.isTerminating || self.userAgent.audioCommandPending) {
+        return;
+    }
+    // Only an explicit user action may reopen a device that has failed. A failed
+    // retry leaves the warning and menu action available without another sheet.
+    [self.userAgent retrySoundAfterFailure];
+    [self updateAudioRecoveryMenuItem];
+}
+
+- (BOOL)validateMenuItem:(NSMenuItem *)menuItem {
+    if (menuItem.action == @selector(retryAudio:)) {
+        return self.userAgent.hasAudioFailure && self.userAgent.isStarted && !self.isTerminating && !self.userAgent.audioCommandPending;
+    }
+    if (menuItem.action == @selector(recoverRecordings:)) {
+        if (self.isTerminating) return NO;
+        AKRecordingRecoveryIndex *index = self.recordingRecoveryController.index;
+        // Validation is a cache read, including unknown/loading/failed discovery.
+        return !index.hasLoaded || index.isRefreshing || index.error != nil || self.recordingAttachmentError != nil || self.recordingRecoveryController.managedJobCount > 0;
+    }
+    return YES;
+}
+
+- (void)SIPUserAgentAudioStateDidChange:(NSNotification *)notification {
+    if (self.userAgent == nil || notification.object != self.userAgent) {
+        return;
+    }
+    [self updateAudioRecoveryMenuItem];
+    if (!self.userAgent.hasAudioFailure || !self.userAgent.isStarted || self.isTerminating) {
+        self.hasPresentedAudioFailure = NO;
+        NSWindow *sheet = self.audioFailureAlert.window;
+        if (sheet.sheetParent != nil) {
+            [sheet.sheetParent endSheet:sheet returnCode:NSAlertThirdButtonReturn];
+        }
+        return;
+    }
+    if (self.hasPresentedAudioFailure || self.audioFailureAlert != nil || self.isTerminating || NSApp == nil) {
+        return;
+    }
+
+    NSWindow *window = NSApp.keyWindow ?: NSApp.mainWindow;
+    while (window.sheetParent != nil) {
+        window = window.sheetParent;
+    }
+    if (window == nil) {
+        [self.preferencesController showSound];
+        window = self.preferencesController.window;
+    }
+    if (window == nil) {
+        return;
+    }
+
+    self.hasPresentedAudioFailure = YES;
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.alertStyle = NSAlertStyleWarning;
+    alert.messageText = NSLocalizedString(@"Audio unavailable", @"Persistent status while call audio has failed.");
+    alert.informativeText = NSLocalizedString(@"Your call may still be connected, but your microphone and speakers are unavailable. Telephone will not retry automatically. Retry Audio tries the selected devices again. To choose different devices, open Sound Settings, then select Retry Audio from the application menu.", @"Audio failure explanation and explicit recovery options.");
+    [alert addButtonWithTitle:NSLocalizedString(@"Retry Audio", @"Explicit audio recovery action.")];
+    [alert addButtonWithTitle:NSLocalizedString(@"Sound Settings", @"Open sound preferences after an audio failure.")];
+    [alert addButtonWithTitle:NSLocalizedString(@"Dismiss", @"Dismiss an audio failure alert.")];
+    self.audioFailureAlert = alert;
+    __weak AppController *weakSelf = self;
+    [alert beginSheetModalForWindow:window completionHandler:^(NSModalResponse returnCode) {
+        AppController *controller = weakSelf;
+        controller.audioFailureAlert = nil;
+        if (returnCode == NSAlertFirstButtonReturn) {
+            [controller retryAudio:controller];
+        } else if (returnCode == NSAlertSecondButtonReturn) {
+            [controller.preferencesController showSound];
+        }
+    }];
+}
+
+- (IBAction)addAccountOnFirstLaunch:(id)sender {
+    if ([[self accountSetupController] addAccountAndSave:sender]) {
+        // Re-enable Preferences.
+        [[self preferencesMenuItem] setAction:@selector(showPreferencePanel:)];
+        
+        // Change back targets and actions of addAccountWindow buttons.
+        [[[self accountSetupController] defaultButton] setTarget:[self accountSetupController]];
+        [[[self accountSetupController] defaultButton] setAction:@selector(addAccount:)];
+        [[[self accountSetupController] otherButton] setTarget:[self accountSetupController]];
+        [[[self accountSetupController] otherButton] setAction:@selector(closeSheet:)];
+        if (!self.isFinishedLaunching) {
+            self.finishedLaunching = YES;
+            [self makeCallAfterLaunchIfNeeded];
+            [self.compositionRoot.orphanLogFileRemoval performSelector:@selector(execute) withObject:nil afterDelay:0];
+            [self showAccountPreferencesIfNeeded];
+        }
+    }
+}
+
+- (void)updateDockTileBadgeLabel {
+    NSString *badgeString;
+    NSInteger badgeNumber = self.accountControllers.unhandledIncomingCallsCount;
+    if (badgeNumber == 0) {
+        badgeString = @"";
+    } else {
+        badgeString = [NSString stringWithFormat:@"%ld", badgeNumber];
+    }
+    
+    [[NSApp dockTile] setBadgeLabel:badgeString];
+}
+
+- (void)showAccountPreferencesIfNeeded {
+    if (self.accountControllers.enabled.count == 0)  {
+        [self.preferencesController showWindowCentered];
+        [self.preferencesController showAccounts];
+    }
+}
+
+- (AccountController *)accountControllerWithDictionary:(NSDictionary *)dict {
+    AKSIPAccount *account = [[AKSIPAccount alloc] initWithDictionary:dict parser:self.userAgent.parser];
+
+    NSString *description = dict[AKSIPAccountKeys.desc];
+    if ([description length] == 0) {
+        description = account.SIPAddress;
+    }
+
+    AccountController *controller = [[AccountController alloc] initWithSIPAccount:account
+                                                               accountDescription:description
+                                                                        userAgent:self.userAgent
+                                                                 ringtonePlayback:self.ringtonePlayback
+                                                                      sleepStatus:self.sleepStatus];
+
+    controller.contactCompletions = self.compositionRoot.diallerContacts;
+    [controller setEnabled:[dict[UserDefaultsKeys.accountEnabled] boolValue]];
+    [controller setSubstitutesPlusCharacter:[dict[UserDefaultsKeys.substitutePlusCharacter] boolValue]];
+    [controller setPlusCharacterSubstitution:dict[UserDefaultsKeys.plusCharacterSubstitutionString]];
+
+    return controller;
+}
+
+
+#pragma mark -
+#pragma mark AccountSetupController delegate
+
+- (void)accountSetupControllerDidAddAccount:(NSNotification *)notification {
+    AccountController *controller = [self accountControllerWithDictionary:notification.userInfo];
+    
+    [self.accountControllers addController:controller];
+    [self bootstrapDefaultRouteIfNeeded];
+    [self.accountControllers updateCallsShouldDisplayAccountInfo];
+    [self.accountsMenuItems update];
+    [self.sharedDialler refreshAccounts];
+    
+    [controller showWindowWithoutMakingKey];
+
+    [self.accountControllers registerAccountIfManualRegistrationRequired:controller];
+}
+
+
+#pragma mark -
+#pragma mark PreferencesController delegate
+
+- (void)preferencesControllerDidRemoveAccount:(NSNotification *)notification {
+    NSInteger index = [notification.userInfo[kAccountIndex] integerValue];
+    AccountController *controller = self.accountControllers[index];
+    
+    if ([controller isEnabled]) {
+        [controller removeAccountFromUserAgent];
+    }
+    
+    [self.accountControllers removeControllerAtIndex:index];
+    [self.accountControllers updateCallsShouldDisplayAccountInfo];
+    [self.accountsMenuItems update];
+    [self.sharedDialler refreshAccounts];
+}
+
+- (void)preferencesControllerDidChangeAccountEnabled:(NSNotification *)notification {
+    NSUInteger index = [[notification userInfo][kAccountIndex] integerValue];
+    
+    NSDictionary *account = [NSUserDefaults.standardUserDefaults arrayForKey:UserDefaultsKeys.accounts][index];
+
+    if ([account[UserDefaultsKeys.accountEnabled] boolValue]) {
+        AccountController *controller = [self accountControllerWithDictionary:account];
+        [controller setAccountUnavailable:NO];
+
+        self.accountControllers[index] = controller;
+        
+        [controller showWindowWithoutMakingKey];
+
+        [self.accountControllers registerAccountIfManualRegistrationRequired:controller];
+        
+    } else {
+        AccountController *controller = self.accountControllers[index];
+        
+        // Close all call windows hanging up all calls.
+        for (CallController *callController in controller.callControllers.copy) {
+            [callController.window performClose:nil];
+        }
+        
+        // Remove account from the user agent.
+        [controller removeAccountFromUserAgent];
+        [controller setEnabled:NO];
+        [controller setAttemptingToRegisterAccount:NO];
+        [controller setAttemptingToUnregisterAccount:NO];
+        [controller setShouldPresentRegistrationError:NO];
+        [controller hideWindow];
+    }
+    
+    [self.accountControllers updateCallsShouldDisplayAccountInfo];
+    [self.accountsMenuItems update];
+    [self.sharedDialler refreshAccounts];
+}
+
+- (void)preferencesControllerDidSwapAccounts:(NSNotification *)notification {
+    NSDictionary *userInfo = [notification userInfo];
+    NSInteger sourceIndex = [userInfo[kSourceIndex] integerValue];
+    NSInteger destinationIndex = [userInfo[kDestinationIndex] integerValue];
+    
+    if (sourceIndex == destinationIndex) {
+        return;
+    }
+    
+    [self.accountControllers insertController:self.accountControllers[sourceIndex] atIndex:destinationIndex];
+    if (sourceIndex < destinationIndex) {
+        [self.accountControllers removeControllerAtIndex:sourceIndex];
+    } else if (sourceIndex > destinationIndex) {
+        [self.accountControllers removeControllerAtIndex:(sourceIndex + 1)];
+    }
+    
+    [self.accountsMenuItems update];
+    [self.sharedDialler refreshAccounts];
+}
+
+- (NSUserDefaults *)networkSettingsDefaults { return NSUserDefaults.standardUserDefaults; }
+
+- (void)preferencesControllerDidChangeNetworkSettings:(NSNotification *)notification {
+    NSUserDefaults *defaults = [self networkSettingsDefaults];
+    
+    [[self userAgent] setTransportPort:[defaults integerForKey:UserDefaultsKeys.transportPort]];
+    [[self userAgent] setSTUNServerHost:[defaults stringForKey:UserDefaultsKeys.stunServerHost]];
+    [[self userAgent] setSTUNServerPort:[defaults integerForKey:UserDefaultsKeys.stunServerPort]];
+    [[self userAgent] setUsesICE:[defaults boolForKey:UserDefaultsKeys.useICE]];
+    [[self userAgent] setOutboundProxyHost:[defaults stringForKey:UserDefaultsKeys.outboundProxyHost]];
+    [[self userAgent] setOutboundProxyPort:[defaults integerForKey:UserDefaultsKeys.outboundProxyPort]];
+    
+    if ([defaults boolForKey:UserDefaultsKeys.useDNSSRV]) {
+        [[self userAgent] setNameServers:self.nameServers.all];
+    } else {
+        [[self userAgent] setNameServers:nil];
+    }
+    
+    // Restart SIP user agent.
+    if (self.userAgent.state != AKSIPUserAgentStateStopped && !self.isTerminating) {
+        [self setShouldPresentUserAgentLaunchError:YES];
+        [self restartUserAgent];
+    }
+}
+
+
+#pragma mark -
+#pragma mark AKSIPUserAgentDelegate
+
+- (BOOL)SIPUserAgentShouldStart {
+    return !self.isTerminating;
+}
+
+- (BOOL)SIPUserAgentShouldAddAccount:(AKSIPAccount *)account {
+    if (self.isTerminating) {
+        return NO;
+    }
+    if (self.userAgent.isStarted) {
+        return YES;
+    } else {
+        if (self.userAgent.state == AKSIPUserAgentStateStopped) {
+            [self.userAgentStart execute];
+        }
+        return NO;
+    }
+}
+
+- (void)SIPUserAgentDidFinishStarting:(NSNotification *)notification {
+    if (self.isTerminating) {
+        if (self.userAgent.isStarted) {
+            [self stopUserAgent];
+        } else {
+            [self finishTerminationAfterRecordings];
+        }
+        return;
+    }
+    if (self.userAgent.isStarted && self.pendingNetworkRestart) {
+        self.pendingNetworkRestart = NO;
+        self.shouldRegisterAllAccounts = YES;
+        [self stopUserAgent];
+        return;
+    }
+    if ([[self userAgent] isStarted]) {
+        if ([self shouldRegisterAllAccounts]) {
+            [self.accountControllers registerAllAccounts];
+        }
+        
+        [self setShouldRegisterAllAccounts:NO];
+        [self setShouldRestartUserAgentASAP:NO];
+        
+    } else {
+        NSLog(@"Could not start SIP user agent. "
+              "Please check your network connection and STUN server settings.");
+        
+        [self setShouldRegisterAllAccounts:NO];
+        self.pendingNetworkRestart = NO;
+        
+        // Set |shouldPresentUserAgentLaunchError| if needed and if it wasn't set
+        // somewhere else.
+        if (![self shouldPresentUserAgentLaunchError]) {
+            // Check whether any AccountController is trying to register or unregister
+            // an acount. If so, we should present SIP user agent launch error.
+            for (AccountController *controller in self.accountControllers.enabled) {
+                if ([controller shouldPresentRegistrationError]) {
+                    [self setShouldPresentUserAgentLaunchError:YES];
+                    [controller setAttemptingToRegisterAccount:NO];
+                    [controller setAttemptingToUnregisterAccount:NO];
+                    [controller setShouldPresentRegistrationError:NO];
+                }
+            }
+        }
+        
+        if ([self shouldPresentUserAgentLaunchError] && [NSApp modalWindow] == nil) {
+            // Display application modal alert.
+            NSAlert *alert = [[NSAlert alloc] init];
+            [alert addButtonWithTitle:NSLocalizedString(@"OK", @"Alert confirmation button.")];
+            [alert setMessageText:NSLocalizedString(@"Could not start SIP user agent.",
+                                                    @"SIP user agent start error.")];
+            [alert setInformativeText:
+             NSLocalizedString(@"Please check your network connection and STUN server settings.",
+                               @"SIP user agent start error informative text.")];
+            [alert runModal]; 
+        }
+    }
+    
+    [self setShouldPresentUserAgentLaunchError:NO];
+}
+
+- (void)SIPUserAgentDidFinishStopping:(NSNotification *)notification {
+    if ([self isTerminating]) {
+        [self finishTerminationAfterRecordings];
+        
+    } else if ([self shouldRegisterAllAccounts]) {
+        self.pendingNetworkRestart = NO;
+        if (self.accountControllers.enabled.count > 0) {
+            [[self userAgentStart] execute];
+        } else {
+            [self setShouldRegisterAllAccounts:NO];
+        }
+    }
+}
+
+- (void)SIPUserAgentDidDetectNAT:(NSNotification *)notification {
+    if ([[self userAgent] detectedNATType] != kAKNATTypeBlocked) {
+        return;
+    }
+
+    NSAlert *alert = [[NSAlert alloc] init];
+    [alert addButtonWithTitle:NSLocalizedString(@"OK", @"Alert confirmation button.")];
+
+    [alert setMessageText:
+     NSLocalizedString(@"Failed to communicate with STUN server.",
+                       @"Failed to communicate with STUN server.")];
+    [alert setInformativeText:
+     NSLocalizedString(@"UDP packets are probably blocked. It is "
+                       "impossible to make or receive calls without that. "
+                       "Make sure that your local firewall and the "
+                       "firewall at your router allow UDP protocol.",
+                       @"Failed to communicate with STUN server "
+                       "informative text.")];
+    [alert runModal];
+}
+
+
+#pragma mark -
+#pragma mark NSWindow notifications
+
+- (void)windowWillClose:(NSNotification *)notification {
+    // User closed Account Setup window. Terminate application.
+    if ([[notification object] isEqual:[[self accountSetupController] window]]) {
+        [[NSNotificationCenter defaultCenter] removeObserver:self
+                                                        name:NSWindowWillCloseNotification
+                                                      object:[[self accountSetupController] window]];
+        
+        [NSApp terminate:self];
+    }
+}
+
+
+#pragma mark -
+#pragma mark NSApplication delegate methods
+
+- (void)applicationWillFinishLaunching:(NSNotification *)notification {
+    [[NSUserDefaults standardUserDefaults] setBool:NO forKey:@"NSFullScreenMenuItemEverywhere"];
+}
+
+- (void)applicationDidFinishLaunching:(NSNotification *)aNotification {
+    NSWindow.allowsAutomaticWindowTabbing = NO;
+    [self configureRecordingAttachmentsWithCatalogue:AKRecordingCatalogue.sharedCatalogue];
+    [self installAudioRecoveryMenuItem];
+    NSMenu *applicationMenu = self.preferencesMenuItem.menu;
+    self.recordingRecoveryMenuItem = [[NSMenuItem alloc] initWithTitle:NSLocalizedString(@"Recover Recordings…", @"Recording recovery menu.") action:@selector(recoverRecordings:) keyEquivalent:@""];
+    self.recordingRecoveryMenuItem.target = self;
+    [applicationMenu insertItem:self.recordingRecoveryMenuItem atIndex:[applicationMenu indexOfItem:self.preferencesMenuItem] + 1];
+    [self refreshRecordingRecoveryJobsWithCompletion:^(BOOL current, NSArray *jobs, NSError *error) {
+        if (current && !self.isTerminating && jobs.count > 0) [self.recordingRecoveryController showRecovery];
+    }];
+    [self.compositionRoot.defaultAppSettings registerDefaults];
+    [self.compositionRoot.settingsMigration execute];
+    [self.compositionRoot startContactAccess];
+    self.helpMenuActionRedirect.target = self.compositionRoot.helpMenuActionTarget;
+    [self configureUserAgent];
+    self.accountsMenuItems = [[AccountsMenuItems alloc] initWithMenu:self.windowMenu controllers:self.accountControllers];
+    NSUserNotificationCenter.defaultUserNotificationCenter.delegate = self;
+    NSApp.servicesProvider = self;
+    NSArray *accounts = [NSUserDefaults.standardUserDefaults arrayForKey:UserDefaultsKeys.accounts];
+    if (accounts.count == 0) {
+        [[self preferencesMenuItem] setAction:NULL];
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                 selector:@selector(windowWillClose:)
+                                                     name:NSWindowWillCloseNotification
+                                                   object:[[self accountSetupController] window]];
+        [[[self accountSetupController] defaultButton] setTarget:self];
+        [[[self accountSetupController] defaultButton] setAction:@selector(addAccountOnFirstLaunch:)];
+        [[[self accountSetupController] otherButton] setTarget:[[self accountSetupController] window]];
+        [[[self accountSetupController] otherButton] setAction:@selector(performClose:)];
+        [[[self accountSetupController] window] center];
+        [[[self accountSetupController] window] makeKeyAndOrderFront:self];
+        return;
+    }
+    for (NSUInteger i = 0; i < accounts.count; ++i) {
+        AccountController *controller = [self accountControllerWithDictionary:accounts[i]];
+        [self.accountControllers addController:controller];
+
+    }
+    [self.accountControllers updateCallsShouldDisplayAccountInfo];
+    [self.accountsMenuItems update];
+    [self.sharedDialler refreshAccounts];
+    [self setShouldPresentUserAgentLaunchError:YES];
+    [self bootstrapDefaultRouteIfNeeded];
+    [self showSharedDialler];
+    [self.accountControllers registerAllAccounts];
+    [DialPlanCoordinator.shared startBackend];
+    [self makeCallAfterLaunchIfNeeded];
+    [self.compositionRoot.orphanLogFileRemoval performSelector:@selector(execute) withObject:nil afterDelay:0];
+    [self showAccountPreferencesIfNeeded];
+    [self setFinishedLaunching:YES];
+}
+
+- (void)configureUserAgent {
+    NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
+    if ([defaults boolForKey:UserDefaultsKeys.useDNSSRV]) {
+        self.userAgent.nameServers = self.nameServers.all;
+    }
+    self.userAgent.outboundProxyHost = [defaults stringForKey:UserDefaultsKeys.outboundProxyHost];
+    self.userAgent.outboundProxyPort = [defaults integerForKey:UserDefaultsKeys.outboundProxyPort];
+    self.userAgent.STUNServerHost = [defaults stringForKey:UserDefaultsKeys.stunServerHost];
+    self.userAgent.STUNServerPort = [defaults integerForKey:UserDefaultsKeys.stunServerPort];
+    self.userAgent.userAgentString = [NSString stringWithFormat:@"%@ %@",
+                                      NSBundle.mainBundle.infoDictionary[@"CFBundleName"],
+                                      NSBundle.mainBundle.infoDictionary[@"CFBundleShortVersionString"]];
+    self.userAgent.logFileName = self.compositionRoot.logFileURL.pathValue;
+    self.userAgent.logLevel = [defaults integerForKey:UserDefaultsKeys.logLevel];
+    self.userAgent.consoleLogLevel = [defaults integerForKey:UserDefaultsKeys.consoleLogLevel];
+    self.userAgent.detectsVoiceActivity = [defaults boolForKey:UserDefaultsKeys.voiceActivityDetection];
+    self.userAgent.usesICE = [defaults boolForKey:UserDefaultsKeys.useICE];
+    self.userAgent.usesQoS = [defaults boolForKey:UserDefaultsKeys.useQoS];
+    self.userAgent.transportPort = [defaults integerForKey:UserDefaultsKeys.transportPort];
+    self.userAgent.usesG711Only = [defaults boolForKey:UserDefaultsKeys.useG711Only];
+    self.userAgent.locksCodec = [defaults boolForKey:UserDefaultsKeys.lockCodec];
+}
+
+- (BOOL)applicationShouldHandleReopen:(NSApplication *)theApplication hasVisibleWindows:(BOOL)flag {
+    if (self.userAgent.hasUnansweredIncomingCalls) {
+        [self.accountControllers showIncomingCallWindows];
+    } else if ([NSApp keyWindow] == nil && self.accountControllers.enabled.count > 0) {
+        [self.accountControllers.enabled.firstObject showWindow];
+    }
+    return YES;
+}
+
+- (void)applicationDidBecomeActive:(NSNotification *)aNotification {
+    [NSUserNotificationCenter.defaultUserNotificationCenter removeAllDeliveredNotifications];
+}
+
+- (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication *)sender {
+    if (self.terminationReplySent) return NSTerminateNow;
+    if (self.isTerminating) return NSTerminateLater;
+    if (self.accountControllers.haveActiveCallControllers) {
+        NSAlert *alert = [[NSAlert alloc] init];
+        [alert addButtonWithTitle:NSLocalizedString(@"Quit", @"Quit button.")];
+        [alert addButtonWithTitle:NSLocalizedString(@"Cancel", @"Cancel button.")].keyEquivalent = @"\033";
+        [alert setMessageText:NSLocalizedString(@"Are you sure you want to quit Telephone?",
+                                                @"Telephone quit confirmation.")];
+        [alert setInformativeText:NSLocalizedString(@"All active calls will be disconnected.",
+                                                    @"Telephone quit confirmation informative text.")];
+        NSInteger choice = [alert runModal];
+        
+        if (choice == NSAlertSecondButtonReturn) {
+            return NSTerminateCancel;
+        }
+    }
+    
+    self.terminationReplySent = NO;
+    [self setTerminating:YES];
+    if ([[self userAgent] isStarted]) {
+        [self stopUserAgent];
+        // SIP shutdown first stops all native recorders and prevents new calls.
+        // Its completion then waits for conversions and main-queue cleanup.
+    } else if (self.userAgent.state == AKSIPUserAgentStateStopped) {
+        [self finishTerminationAfterRecordings];
+    }
+    // If starting/stopping, its notification completes the same shutdown path.
+    return NSTerminateLater;
+}
+
+- (void)finishTerminationAfterRecordings {
+    if (self.waitingForRecordingFinalizations || self.terminationReplySent || !self.isTerminating) return;
+    self.waitingForRecordingFinalizations = YES;
+    NSUInteger generation = self.terminationGeneration;
+    [self waitForRecordingFinalizations:^{
+        if (!self.isTerminating || self.terminationReplySent || self.terminationGeneration != generation) return;
+        [self finishPendingHistoryWrites:^{
+            if (!self.isTerminating || self.terminationReplySent || self.terminationGeneration != generation) return;
+            [self retryFailedHistoryWrites:^(BOOL succeeded) {
+                if (!self.isTerminating || self.terminationReplySent || self.terminationGeneration != generation) return;
+                if (!succeeded) {
+                    self.waitingForRecordingFinalizations = NO;
+                    [self cancelTerminationAfterPersistenceFailure];
+                    [self callHistoryPersistenceDidFail:nil];
+                    return;
+                }
+                if (self.userAgent.state == AKSIPUserAgentStateStopped) {
+                    [self finishTerminationAfterRecoveryScan];
+                } else {
+                    self.waitingForRecordingFinalizations = NO;
+                    if (self.userAgent.isStarted) [self stopUserAgent];
+                }
+            }];
+        }];
+    }];
+}
+
+- (void)finishTerminationAfterRecoveryScan {
+    NSUInteger generation = self.terminationGeneration;
+    [self refreshRecordingRecoveryJobsWithCompletion:^(BOOL current, NSArray *jobs, NSError *error) {
+        if (!self.isTerminating || self.terminationReplySent || self.terminationGeneration != generation) return;
+        if (!current) {
+            // A newer explicit snapshot superseded this scan. Obtain a current
+            // result without repeating recording/history barriers or replying early.
+            [self finishTerminationAfterRecoveryScan];
+            return;
+        }
+        BOOL allowQuit = error != nil ? [self confirmQuitWithRecordingRecoveryError:error]
+                                     : (jobs.count == 0 || [self confirmQuitWithRecoveryJobs:jobs]);
+        self.waitingForRecordingFinalizations = NO;
+        if (!allowQuit) { [self cancelTerminationAfterPersistenceFailure]; return; }
+        self.terminationReplySent = YES;
+        [self replyToTermination:YES];
+    }];
+}
+
+- (NSArray<NSDictionary *> *)pendingRecordingRecoveryJobs { return self.recordingRecoveryController.index.jobs; }
+- (void)configureRecordingAttachmentsWithCatalogue:(AKRecordingCatalogue *)catalogue {
+    // Construction and factory wiring do no file work. Only actual application
+    // launch installs the production publisher; isolated tests inject a store.
+    self.recordingCatalogue = catalogue;
+    self.recordingHistoryActions = [[RecordingHistoryActions alloc] initWithCatalogue:catalogue];
+    self.recordingHistoryActions.actionsEnabled = !self.isTerminating;
+    self.callHistoryViewEventTargetFactory.recordingHistoryActions = self.recordingHistoryActions;
+    AKSetRecordingAttachmentPublisher(^BOOL(NSDictionary *attachment, NSError **error) {
+        return [catalogue persistAttachment:attachment error:error];
+    });
+}
+
+- (void)reconcileRecordingAttachmentsWithCompletion:(void (^)(BOOL, NSError * _Nullable))completion {
+    AKReconcilePendingRecordingAttachments(completion);
+}
+
+- (void)refreshRecordingAttachmentsWithCompletion:(void (^)(NSError * _Nullable))completion {
+    AKRecordingCatalogue *catalogue = self.recordingCatalogue;
+    if (catalogue == nil) { completion(nil); return; }
+    // Reconciliation is metadata-only and admitted to the recording drain. It
+    // must finish before the recovery list decides which retained jobs remain.
+    [self reconcileRecordingAttachmentsWithCompletion:^(BOOL succeeded, NSError *error) {
+        [catalogue refreshWithCompletion:^(BOOL loaded) {
+            NSError *result = error ?: catalogue.error;
+            if (!succeeded && result == nil) result = [NSError errorWithDomain:AKRecordingCatalogueErrorDomain code:9
+                userInfo:@{NSLocalizedDescriptionKey:NSLocalizedString(@"Recording links could not be checked. Existing audio and recovery files have been kept.", @"Attachment reconciliation failure.")}];
+            self.recordingAttachmentError = result;
+            completion(result);
+        }];
+    }];
+}
+
+- (void)refreshRecordingRecoveryJobsWithCompletion:(void (^)(BOOL, NSArray *, NSError * _Nullable))completion {
+    [self refreshRecordingAttachmentsWithCompletion:^(NSError *attachmentError) {
+        AKRecordingRecoveryIndex *index = self.recordingRecoveryController.index;
+        [index refreshWithCompletion:^(BOOL current) {
+            completion(current, index.jobs, attachmentError ?: index.error);
+        }];
+    }];
+}
+- (void)waitForRecordingFinalizations:(dispatch_block_t)completion {
+    RecordingHistoryActions *actions = self.recordingHistoryActions;
+    if (actions == nil) { AKWaitForPendingRecordingFinalizations(completion); return; }
+    // Playback/reveal may own a resolved grant even after its history row has
+    // gone. Close admission first, then release those scopes before replying.
+    [actions waitForPendingActionsWithCompletion:^{ AKWaitForPendingRecordingFinalizations(completion); }];
+}
+- (void)finishPendingHistoryWrites:(dispatch_block_t)completion { [HistoryPersistenceCoordinator finishPendingWritesWithCompletion:completion]; }
+- (void)retryFailedHistoryWrites:(void (^)(BOOL))completion { [HistoryPersistenceCoordinator retryFailedWritesWithCompletion:completion]; }
+- (void)replyToTermination:(BOOL)shouldTerminate { [NSApp replyToApplicationShouldTerminate:shouldTerminate]; }
+
+- (void)cancelTerminationAfterPersistenceFailure {
+    self.terminating = NO;
+    self.terminationReplySent = NO;
+    [HistoryPersistenceCoordinator resumeAcceptingWrites];
+    [self replyToTermination:NO];
+}
+
+- (BOOL)confirmQuitWithRecordingRecoveryError:(NSError *)error {
+    NSAlert *alert = [NSAlert new];
+    alert.messageText = NSLocalizedString(@"Recordings could not be checked", @"Quit recovery discovery failed.");
+    alert.informativeText = [NSString stringWithFormat:NSLocalizedString(@"%@\nOriginal audio has been kept. You can check recovery again after reopening Telephone.", @"Quit after recovery discovery error."), error.localizedDescription];
+    [alert addButtonWithTitle:NSLocalizedString(@"Keep Files and Quit", @"Quit with durable recovery files.")];
+    [alert addButtonWithTitle:NSLocalizedString(@"Stay Open", @"Keep application open for recovery.")];
+    return [alert runModal] == NSAlertFirstButtonReturn;
+}
+
+- (BOOL)confirmQuitWithRecoveryJobs:(NSArray *)jobs {
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = NSLocalizedString(@"Some recordings need recovery", @"Recording quit recovery warning.");
+    alert.informativeText = NSLocalizedString(@"The original audio is safely retained. You can recover it from the Telephone menu after reopening the app.", @"Durable recording recovery at quit.");
+    [alert addButtonWithTitle:NSLocalizedString(@"Keep Files and Quit", @"Quit with durable recovery files.")];
+    [alert addButtonWithTitle:NSLocalizedString(@"Stay Open", @"Keep application open for recovery.")];
+    return [alert runModal] == NSAlertFirstButtonReturn;
+}
+
+- (void)callHistoryPersistenceDidFail:(NSNotification *)notification {
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{ [self callHistoryPersistenceDidFail:notification]; });
+        return;
+    }
+    if (self.isTerminating || self.presentingHistoryError) return;
+    self.presentingHistoryError = YES;
+    NSAlert *alert = [[NSAlert alloc] init];
+    NSString *operation = notification.userInfo[@"operation"];
+    if ([operation isEqualToString:@"clear"]) {
+        alert.messageText = NSLocalizedString(@"Call history could not be cleared", @"History clear failure.");
+    } else if ([operation isEqualToString:@"read"]) {
+        alert.messageText = NSLocalizedString(@"Call history could not be loaded", @"History read failure.");
+    } else {
+        alert.messageText = NSLocalizedString(@"Call history could not be saved", @"History persistence failure.");
+    }
+    alert.informativeText = NSLocalizedString(@"Your existing history has been kept. Check the available disk space and folder access, then retry.", @"History failure recovery guidance.");
+    [alert addButtonWithTitle:NSLocalizedString(@"Retry", @"Retry failed history writes.")];
+    [alert addButtonWithTitle:NSLocalizedString(@"Later", @"Retain a retryable history write.")];
+    if ([alert runModal] == NSAlertFirstButtonReturn) {
+        [self retryFailedHistoryWrites:^(BOOL succeeded) {
+            self.presentingHistoryError = NO;
+            if (!succeeded) [self callHistoryPersistenceDidFail:nil];
+        }];
+    } else self.presentingHistoryError = NO;
+}
+
+- (void)recordingExportDidFail:(NSNotification *)notification {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (!self.isTerminating) [self recoverRecordings:nil];
+    });
+}
+
+- (IBAction)recoverRecordings:(id)sender {
+    if (self.isTerminating) return;
+    [self refreshRecordingRecoveryJobsWithCompletion:^(BOOL current, NSArray *jobs, NSError *error) {
+        if (current && !self.isTerminating) [self.recordingRecoveryController refreshPresentation];
+    }];
+    // Start discovery first so showRecovery cannot admit a duplicate initial scan.
+    [self.recordingRecoveryController showRecovery];
+}
+
+
+#pragma mark -
+#pragma mark AKSIPCall notifications
+
+- (void)SIPCallCalling:(NSNotification *)notification {
+    [self updateDockTileBadgeLabel];
+}
+
+- (void)SIPCallIncoming:(NSNotification *)notification {
+    AKSIPCall *call = notification.object;
+    if ([call isKindOfClass:AKSIPCall.class] && call.canonicalDestination == nil) {
+        call.canonicalDestination = [DialPlanStore.shared normaliseDestination:call.remoteURI.user].canonicalNumber;
+    }
+    [self updateDockTileBadgeLabel];
+}
+
+- (void)SIPCallConnecting:(NSNotification *)notification {
+    [self updateDockTileBadgeLabel];
+}
+
+- (void)SIPCallDidDisconnect:(NSNotification *)notification {
+    [self updateDockTileBadgeLabel];
+    if (self.shouldRestartUserAgentASAP && !self.accountControllers.haveActiveCallControllers) {
+        [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(restartUserAgent) object:nil];
+        [self setShouldRestartUserAgentASAP:NO];
+        [self restartUserAgent];
+    }
+}
+
+
+#pragma mark -
+#pragma mark AuthenticationFailureController notifications
+
+- (void)authenticationFailureControllerDidChangeUsernameAndPassword:(NSNotification *)notification {
+    AccountController *controller = [[notification object] accountController];
+    NSInteger index = [self.accountControllers indexOfController:controller];
+    if (index != NSNotFound) {
+        NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+        NSMutableArray *accounts = [NSMutableArray arrayWithArray:[defaults arrayForKey:UserDefaultsKeys.accounts]];
+        NSMutableDictionary *account = [NSMutableDictionary dictionaryWithDictionary:accounts[index]];
+        account[AKSIPAccountKeys.username] = controller.account.username;
+        accounts[index] = account;
+        [defaults setObject:accounts forKey:UserDefaultsKeys.accounts];
+        AccountPreferencesViewController *viewController = self.preferencesController.accountPreferencesViewController;
+        if (viewController.accountsTable.selectedRow == index) {
+            [viewController populateFieldsForAccountAtIndex:index];
+        }
+    }
+}
+
+#pragma mark - NSUserNotificationCenterDelegate
+
+- (void)userNotificationCenter:(NSUserNotificationCenter *)center didActivateNotification:(NSUserNotification *)notification {
+    CallController *controller = [self.accountControllers callControllerByIdentifier:notification.identifier];
+    switch (notification.activationType) {
+        case NSUserNotificationActivationTypeContentsClicked:
+            [controller showWindow:self];
+            [center removeDeliveredNotification:notification];
+            break;
+        case NSUserNotificationActivationTypeActionButtonClicked:
+            [controller acceptCall];
+            break;
+        case NSUserNotificationActivationTypeAdditionalActionClicked:
+            [controller hangUpCall];
+            break;
+        default:
+            break;
+    }
+}
+
+
+#pragma mark -
+#pragma mark NSWorkspace notifications
+
+- (void)workspaceWillSleep:(NSNotification *)notification {
+    [self.accountControllers setCredentialAccessSuspended:YES];
+    [AKCredentialBroker.sharedBroker invalidateAll];
+    if (self.userAgent.isStarted) {
+        [self stopUserAgentAndWait];
+    }
+}
+
+- (void)workspaceDidWake:(NSNotification *)notification {
+    // WorkspaceSleepStatus receives the same notification. Observer order is
+    // unspecified, so let all wake observers publish their state before retrying.
+    __weak AppController *weakSelf = self;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        AppController *controller = weakSelf;
+        if (!controller || controller.isTerminating || !controller.isUserSessionActive || controller.sleepStatus.isSleeping) return;
+        [controller.accountControllers setCredentialAccessSuspended:NO];
+        [controller.accountControllers registerReachableAccounts];
+    });
+}
+
+- (void)workspaceSessionDidResignActive:(NSNotification *)notification {
+    self.userSessionActive = NO;
+    [self.accountControllers setCredentialAccessSuspended:YES];
+    [AKCredentialBroker.sharedBroker invalidateAll];
+    [self.accountControllers unregisterAllAccounts];
+}
+
+- (void)workspaceSessionDidBecomeActive:(NSNotification *)notification {
+    self.userSessionActive = YES;
+    if (!self.isTerminating && !self.sleepStatus.isSleeping) {
+        [self.accountControllers setCredentialAccessSuspended:NO];
+        [self.accountControllers registerAllAccounts];
+    }
+}
+
+
+#pragma mark -
+#pragma mark Apple event handler for URLs support
+
+- (void)handleGetURLEvent:(NSAppleEventDescriptor *)event withReplyEvent:(NSAppleEventDescriptor *)replyEvent {
+    [self makeCallOrRememberDestination:[[event paramDescriptorForKeyword:keyDirectObject] stringValue]];
+}
+
+
+#pragma mark -
+#pragma mark Service Provider
+
+- (void)makeCallFromTextService:(NSPasteboard *)pboard userData:(NSString *)userData error:(NSString **)error {
+    if ([pboard canReadObjectForClasses:@[[NSString class]] options:@{}]) {
+        [self makeCallOrRememberDestination:[pboard stringForType:NSPasteboardTypeString]];
+    } else {
+        NSLog(@"Could not make call, pboard couldn't give string.");
+    }
+}
+
+#pragma mark -
+
+- (void)makeCallAfterLaunchIfNeeded {
+    if (self.destinationToCall.length > 0) {
+        [self makeCallTo:self.destinationToCall];
+        self.destinationToCall = @"";
+    }
+}
+
+- (void)makeCallOrRememberDestination:(NSString *)destination {
+    if (self.isFinishedLaunching) {
+        [self makeCallTo:destination];
+    } else {
+        self.destinationToCall = destination;
+    }
+}
+
+- (void)makeCallTo:(NSString *)destination {
+    if ([self canMakeCall]) [DialPlanCoordinator.shared routeDestination:destination phoneLabel:@""];
+}
+
+- (BOOL)canMakeCall {
+    return !self.isTerminating && NSApp.modalWindow == nil && self.accountControllers.enabled.count > 0;
+}
+
+#pragma mark - NameServersChangeEventTarget
+
+- (void)nameServersDidChange:(NameServers *)nameServers {
+    NSArray *servers = nameServers.all;
+    if ([[NSUserDefaults standardUserDefaults] boolForKey:UserDefaultsKeys.useDNSSRV] &&
+        servers.count > 0 &&
+        ![self.userAgent.nameServers isEqualToArray:servers]) {
+
+        self.userAgent.nameServers = servers;
+        [self restartUserAgentAfterDelayOrMarkForRestart];
+    }
+}
+
+
+@end

@@ -1,0 +1,180 @@
+//
+//  CallController.h
+//  Telephone
+//
+//  Copyright © 2008-2016 Alexey Kuznetsov
+//  Copyright © 2016-2022 64 Characters
+//
+//  Telephone is free software: you can redistribute it and/or modify
+//  it under the terms of the GNU General Public License as published by
+//  the Free Software Foundation, either version 3 of the License, or
+//  (at your option) any later version.
+//
+//  Telephone is distributed in the hope that it will be useful,
+//  but WITHOUT ANY WARRANTY; without even the implied warranty of
+//  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+//  GNU General Public License for more details.
+//
+
+#import <Cocoa/Cocoa.h>
+
+#import "AKSIPCall.h"
+
+#import "CallControllerDelegate.h"
+
+
+@class AccountController, AKSIPCall, AKSIPURI, AKSIPUserAgent;
+@class IncomingCallViewController, ActiveCallViewController;
+@class EndedCallViewController, CallTransferController;
+
+typedef NS_ENUM(NSInteger, AKCallRecordingStatus) {
+    AKCallRecordingStatusDisabled,
+    AKCallRecordingStatusStarting,
+    AKCallRecordingStatusFailed,
+    AKCallRecordingStatusCapturing,
+};
+
+typedef NS_ENUM(NSInteger, AKRecordingDestinationReason) {
+    AKRecordingDestinationReasonNone,
+    AKRecordingDestinationReasonInvalidBookmark,
+    AKRecordingDestinationReasonAccessDenied,
+    AKRecordingDestinationReasonCreationFailed,
+    AKRecordingDestinationReasonReservationFailed,
+    AKRecordingDestinationReasonUnavailable,
+};
+
+// A call controller.
+@interface CallController : NSWindowController <AKSIPCallDelegate> {
+  @protected
+    ActiveCallViewController *_activeCallViewController;
+    EndedCallViewController *_endedCallViewController;
+}
+
+@property(nonatomic, readonly, weak) id<CallControllerDelegate> delegate;
+
+// The receiver's identifier.
+@property(nonatomic, copy) NSString *identifier;
+
+// Call controlled by the receiver.
+@property(nonatomic, strong) AKSIPCall *call;
+
+// Account controller the receiver belongs to.
+@property(nonatomic, weak) AccountController *accountController;
+
+// Call transfer controller.
+@property(nonatomic, readonly) CallTransferController *callTransferController;
+
+
+// Incoming call view controller.
+@property(nonatomic, readonly) IncomingCallViewController *incomingCallViewController;
+
+// Active call view controller.
+@property(nonatomic, readonly, strong) ActiveCallViewController *activeCallViewController;
+
+// Ended call view controller.
+@property(nonatomic, readonly, strong) EndedCallViewController *endedCallViewController;
+
+@property(nonatomic, copy) NSString *title;
+
+// Remote party dislpay name.
+@property(nonatomic, copy) NSString *displayedName;
+
+// Call status.
+@property(nonatomic, copy) NSString *status;
+
+// Compact card presentation; underlying call status/title retain their values.
+@property(nonatomic, readonly, copy) NSString *compactWindowTitle;
+@property(nonatomic, readonly, copy) NSString *presentationStatus;
+@property(nonatomic, readonly, copy) NSString *presentationDuration;
+// Consultation sheets retain elapsed time in their existing status slot.
+@property(nonatomic, readonly, copy) NSString *presentationTransferStatus;
+
+// Remote party name from the Address Book.
+@property(nonatomic, copy) NSString *nameFromAddressBook;
+
+// Remote party label from the Address Book.
+@property(nonatomic, copy) NSString *phoneLabelFromAddressBook;
+
+// Call destination entered by a user.
+@property(nonatomic, copy) NSString *enteredCallDestination;
+
+// SIP URI for the redial.
+@property(nonatomic, copy) AKSIPURI *redialURI;
+@property(nonatomic, copy, nullable) NSString *canonicalDestination;
+
+// Timer to display intermediate call status. This status appears for the short period of time and then is being
+// replaced with the current call status.
+@property(nonatomic, strong) NSTimer *intermediateStatusTimer;
+
+// Call start time.
+@property(nonatomic, assign) NSTimeInterval callStartTime;
+
+// A Boolean value indicating whether the receiver's call is on hold.
+@property(nonatomic, assign, getter=isCallOnHold) BOOL callOnHold;
+
+// A Boolean value indicating whether the receiver's call is active.
+@property(nonatomic, assign, getter=isCallActive) BOOL callActive;
+
+// A Boolean value indicating whether the receiver's call is unhandled.
+@property(nonatomic, readonly, getter=isCallUnhandled) BOOL callUnhandled;
+@property(nonatomic, readonly) BOOL acceptsPendingCallResult;
+
+// Presentation admission is separate from asynchronously updated native call state.
+@property(nonatomic, readonly) BOOL callControlsEnabled;
+@property(nonatomic, readonly) BOOL holdChangePending;
+@property(nonatomic, readonly) BOOL muteChangePending;
+
+
+- (instancetype)initWithWindowNibName:(NSString *)windowNibName
+                    accountController:(AccountController *)accountController
+                            userAgent:(AKSIPUserAgent *)userAgent
+                             delegate:(id<CallControllerDelegate>)delegate;
+
+// Accepts an incoming call.
+- (void)acceptCall;
+
+// Hangs up a call.
+- (void)hangUpCall;
+
+// Redials a call.
+- (void)redial;
+
+// Toggles call hold.
+- (void)toggleCallHold;
+- (void)requestToggleCallHoldWithCompletion:(void (^)(BOOL accepted))completion;
+
+// Toggles microphone mute.
+- (void)toggleMicrophoneMute;
+
+// Starts recording when the automatic recording preference is enabled and call media is ready.
+- (void)startAutomaticRecordingIfNeeded;
+
+// Stops and finalizes the active recording.
+- (void)stopRecording;
+
+// Presentation belongs to the current start attempt; a reserved filename is not captured audio.
+@property(nonatomic, readonly) AKCallRecordingStatus recordingStatus;
+@property(nonatomic, readonly) AKRecordingDestinationReason recordingDestinationReason;
+@property(nonatomic, readonly) AKRecordingDestinationReason recordingFallbackReason;
+@property(nonatomic, readonly) AKRecordingStartResult recordingStartResult;
+@property(nonatomic, readonly) BOOL recordingUsesFallback;
+@property(nonatomic, readonly, copy, nullable) NSURL *recordingDestinationFolderURL;
+@property(nonatomic, readonly, copy, nullable) NSURL *recordingCapturedURL;
+@property(nonatomic, readonly, copy) NSString *recordingSummary;
+@property(nonatomic, readonly, copy) NSString *recordingDetail;
+- (IBAction)retryRecording:(id)sender;
+- (IBAction)chooseRecordingFolder:(id)sender;
+- (IBAction)revealRecordingFolder:(id)sender;
+
+// Sets intermediate call status. This status appears for the short period of time and then is being replaced with the
+// current call status.
+- (void)setIntermediateStatus:(NSString *)newIntermediateStatus;
+
+// Method to be called when intermediate call status timer fires.
+- (void)intermediateStatusTimerTick:(NSTimer *)theTimer;
+
+- (void)prepareForCall;
+- (void)showEndedCallView;
+- (void)showIncomingCallView;
+
+@end

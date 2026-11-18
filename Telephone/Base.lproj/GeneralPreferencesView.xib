@@ -1,0 +1,199 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<document type="com.apple.InterfaceBuilder3.Cocoa.XIB" version="3.0" toolsVersion="18122" targetRuntime="MacOSX.Cocoa" propertyAccessControl="none" useAutolayout="YES">
+    <dependencies>
+        <deployment identifier="macosx"/>
+        <plugIn identifier="com.apple.InterfaceBuilder.CocoaPlugin" version="18122"/>
+        <capability name="documents saved in the Xcode 8 format" minToolsVersion="8.0"/>
+    </dependencies>
+    <objects>
+        <customObject id="-2" userLabel="File's Owner" customClass="GeneralPreferencesViewController">
+            <connections>
+                <outlet property="recordingFolderPathField" destination="rec-folder-field" id="rec-folder-outlet"/>
+                <outlet property="recordingFormatPopUpButton" destination="rec-format-popup" id="rec-format-outlet"/>
+                <outlet property="view" destination="150" id="528"/>
+            </connections>
+        </customObject>
+        <customObject id="-1" userLabel="First Responder" customClass="FirstResponder"/>
+        <customObject id="-3" userLabel="Application" customClass="NSObject"/>
+        <userDefaultsController representsSharedInstance="YES" id="201"/>
+        <customView translatesAutoresizingMaskIntoConstraints="NO" id="150" userLabel="General">
+            <rect key="frame" x="0.0" y="0.0" width="448" height="206"/>
+            <subviews>
+                <button translatesAutoresizingMaskIntoConstraints="NO" id="255">
+                    <rect key="frame" x="14" y="175" width="250" height="18"/>
+                    <buttonCell key="cell" type="check" title="Automatically format phone numbers" bezelStyle="regularSquare" imagePosition="left" alignment="left" state="on" inset="2" id="256">
+                        <behavior key="behavior" changeContents="YES" doesNotDimImage="YES" lightByContents="YES"/>
+                        <font key="font" metaFont="system"/>
+                    </buttonCell>
+                    <connections>
+                        <binding destination="201" name="value" keyPath="values.FormatTelephoneNumbers" id="303"/>
+                    </connections>
+                </button>
+                <button translatesAutoresizingMaskIntoConstraints="NO" id="520">
+                    <rect key="frame" x="14" y="153" width="292" height="18"/>
+                    <buttonCell key="cell" type="check" title="Pause Music, iTunes, and Spotify during call" bezelStyle="regularSquare" imagePosition="left" alignment="left" state="on" inset="2" id="521">
+                        <behavior key="behavior" changeContents="YES" doesNotDimImage="YES" lightByContents="YES"/>
+                        <font key="font" metaFont="system"/>
+                    </buttonCell>
+                    <connections>
+                        <binding destination="201" name="value" keyPath="values.PauseITunes" id="523"/>
+                    </connections>
+                </button>
+                <button translatesAutoresizingMaskIntoConstraints="NO" id="524">
+                    <rect key="frame" x="14" y="131" width="224" height="18"/>
+                    <buttonCell key="cell" type="check" title="Automatically close call windows" bezelStyle="regularSquare" imagePosition="left" alignment="left" state="on" inset="2" id="525">
+                        <behavior key="behavior" changeContents="YES" doesNotDimImage="YES" lightByContents="YES"/>
+                        <font key="font" metaFont="system"/>
+                    </buttonCell>
+                    <connections>
+                        <binding destination="201" name="value" keyPath="values.AutoCloseCallWindow" id="527"/>
+                    </connections>
+                </button>
+                <button translatesAutoresizingMaskIntoConstraints="NO" id="529">
+                    <rect key="frame" x="14" y="109" width="96" height="18"/>
+                    <buttonCell key="cell" type="check" title="Call waiting" bezelStyle="regularSquare" imagePosition="left" alignment="left" state="on" inset="2" id="530">
+                        <behavior key="behavior" changeContents="YES" doesNotDimImage="YES" lightByContents="YES"/>
+                        <font key="font" metaFont="system"/>
+                    </buttonCell>
+                    <connections>
+                        <binding destination="201" name="value" keyPath="values.CallWaiting" id="532"/>
+                    </connections>
+                </button>
+                <button toolTip="Your microphone is recorded on the left and the remote party on the right." translatesAutoresizingMaskIntoConstraints="NO" id="rec-pref-1">
+                    <rect key="frame" x="14" y="87" width="408" height="18"/>
+                    <buttonCell key="cell" type="check" title="Automatically record all calls (ensure everyone consents)" bezelStyle="regularSquare" imagePosition="left" alignment="left" inset="2" id="rec-pref-2">
+                        <behavior key="behavior" changeContents="YES" doesNotDimImage="YES" lightByContents="YES"/>
+                        <font key="font" metaFont="system"/>
+                    </buttonCell>
+                    <connections>
+                        <binding destination="201" name="value" keyPath="values.AutomaticallyRecordCalls" id="rec-pref-3"/>
+                    </connections>
+                </button>
+                <textField horizontalHuggingPriority="251" verticalHuggingPriority="750" translatesAutoresizingMaskIntoConstraints="NO" id="rec-format-label">
+                    <rect key="frame" x="16" y="57" width="60" height="16"/>
+                    <textFieldCell key="cell" lineBreakMode="clipping" title="Format:" id="rec-format-label-cell">
+                        <font key="font" metaFont="system"/>
+                        <color key="textColor" name="labelColor" catalog="System" colorSpace="catalog"/>
+                        <color key="backgroundColor" name="controlColor" catalog="System" colorSpace="catalog"/>
+                    </textFieldCell>
+                </textField>
+                <popUpButton verticalHuggingPriority="750" translatesAutoresizingMaskIntoConstraints="NO" id="rec-format-popup">
+                    <rect key="frame" x="82" y="52" width="220" height="25"/>
+                    <popUpButtonCell key="cell" type="push" title="OGG — smallest files" bezelStyle="rounded" alignment="left" lineBreakMode="truncatingTail" state="on" borderStyle="borderAndBezel" inset="2" selectedItem="rec-format-item" id="rec-format-popup-cell">
+                        <behavior key="behavior" lightByBackground="YES" lightByGray="YES"/>
+                        <font key="font" metaFont="menu"/>
+                        <menu key="menu" id="rec-format-menu">
+                            <items>
+                                <menuItem title="OGG — smallest files" state="on" id="rec-format-item"/>
+                            </items>
+                        </menu>
+                    </popUpButtonCell>
+                    <connections>
+                        <action selector="recordingFormatChanged:" target="-2" id="rec-format-action"/>
+                    </connections>
+
+                    <accessibility description="Recording format"/>
+</popUpButton>
+                <textField horizontalHuggingPriority="251" verticalHuggingPriority="750" translatesAutoresizingMaskIntoConstraints="NO" id="rec-folder-label">
+                    <rect key="frame" x="16" y="21" width="55" height="16"/>
+                    <textFieldCell key="cell" lineBreakMode="clipping" title="Save to:" id="rec-folder-label-cell">
+                        <font key="font" metaFont="system"/>
+                        <color key="textColor" name="labelColor" catalog="System" colorSpace="catalog"/>
+                        <color key="backgroundColor" name="controlColor" catalog="System" colorSpace="catalog"/>
+                    </textFieldCell>
+                </textField>
+                <textField horizontalHuggingPriority="249" horizontalCompressionResistancePriority="49" verticalHuggingPriority="750" translatesAutoresizingMaskIntoConstraints="NO" id="rec-folder-field">
+                    <rect key="frame" x="77" y="16" width="253" height="24"/>
+                    <textFieldCell key="cell" lineBreakMode="truncatingMiddle" selectable="YES" editable="NO" borderStyle="bezel" drawsBackground="YES" title="" id="rec-folder-field-cell">
+                        <font key="font" metaFont="system"/>
+                        <color key="textColor" name="controlTextColor" catalog="System" colorSpace="catalog"/>
+                        <color key="backgroundColor" name="textBackgroundColor" catalog="System" colorSpace="catalog"/>
+                    </textFieldCell>
+
+                    <accessibility description="Call recordings folder"/>
+</textField>
+                <button verticalHuggingPriority="750" translatesAutoresizingMaskIntoConstraints="NO" id="rec-folder-button">
+                    <rect key="frame" x="338" y="12" width="94" height="32"/>
+                    <buttonCell key="cell" type="push" title="Choose…" bezelStyle="rounded" alignment="center" borderStyle="border" inset="2" id="rec-folder-button-cell">
+                        <behavior key="behavior" pushIn="YES" lightByBackground="YES" lightByGray="YES"/>
+                        <font key="font" metaFont="system"/>
+                    </buttonCell>
+                    <connections>
+                        <action selector="chooseRecordingFolder:" target="-2" id="rec-folder-action"/>
+                    </connections>
+                </button>
+                <textField identifier="SettingsSectionHeading" horizontalHuggingPriority="251" verticalHuggingPriority="750" translatesAutoresizingMaskIntoConstraints="NO" id="section-calling-heading">
+                    <rect key="frame" x="16" y="10" width="130" height="16"/>
+                    <textFieldCell key="cell" lineBreakMode="clipping" title="Calling" id="section-calling-cell">
+                        <font key="font" metaFont="systemBold" size="13"/>
+                        <color key="textColor" name="labelColor" catalog="System" colorSpace="catalog"/>
+                        <color key="backgroundColor" name="controlColor" catalog="System" colorSpace="catalog"/>
+                    </textFieldCell>
+                </textField>
+                <box identifier="SettingsSectionSeparator" boxType="separator" translatesAutoresizingMaskIntoConstraints="NO" id="section-calling-line">
+                    <rect key="frame" x="156" y="18" width="276" height="1"/>
+                </box>
+                <textField identifier="SettingsSectionHeading" horizontalHuggingPriority="251" verticalHuggingPriority="750" translatesAutoresizingMaskIntoConstraints="NO" id="section-recording-heading">
+                    <rect key="frame" x="16" y="10" width="130" height="16"/>
+                    <textFieldCell key="cell" lineBreakMode="clipping" title="Recording" id="section-recording-cell">
+                        <font key="font" metaFont="systemBold" size="13"/>
+                        <color key="textColor" name="labelColor" catalog="System" colorSpace="catalog"/>
+                        <color key="backgroundColor" name="controlColor" catalog="System" colorSpace="catalog"/>
+                    </textFieldCell>
+                </textField>
+                <box identifier="SettingsSectionSeparator" boxType="separator" translatesAutoresizingMaskIntoConstraints="NO" id="section-recording-line">
+                    <rect key="frame" x="156" y="18" width="276" height="1"/>
+                </box>
+            </subviews>
+            <constraints>
+                <constraint firstAttribute="width" relation="greaterThanOrEqual" constant="448" id="cg-1"/>
+                <constraint firstAttribute="height" relation="greaterThanOrEqual" constant="206" id="cg-2"/>
+                <constraint firstAttribute="leading" firstItem="255" secondItem="150" secondAttribute="leading" constant="16" id="cg-3"/>
+                <constraint firstAttribute="trailing" firstItem="150" relation="greaterThanOrEqual" secondItem="255" secondAttribute="trailing" constant="16" id="cg-4"/>
+                <constraint firstAttribute="top" firstItem="255" secondItem="150" secondAttribute="top" constant="32" id="cg-5"/>
+                <constraint firstAttribute="leading" firstItem="520" secondItem="150" secondAttribute="leading" constant="16" id="cg-6"/>
+                <constraint firstAttribute="trailing" firstItem="150" relation="greaterThanOrEqual" secondItem="520" secondAttribute="trailing" constant="16" id="cg-7"/>
+                <constraint firstAttribute="top" firstItem="520" secondItem="255" secondAttribute="bottom" constant="6" id="cg-8"/>
+                <constraint firstAttribute="leading" firstItem="524" secondItem="150" secondAttribute="leading" constant="16" id="cg-9"/>
+                <constraint firstAttribute="trailing" firstItem="150" relation="greaterThanOrEqual" secondItem="524" secondAttribute="trailing" constant="16" id="cg-10"/>
+                <constraint firstAttribute="top" firstItem="524" secondItem="520" secondAttribute="bottom" constant="6" id="cg-11"/>
+                <constraint firstAttribute="leading" firstItem="529" secondItem="150" secondAttribute="leading" constant="16" id="cg-12"/>
+                <constraint firstAttribute="trailing" firstItem="150" relation="greaterThanOrEqual" secondItem="529" secondAttribute="trailing" constant="16" id="cg-13"/>
+                <constraint firstAttribute="top" firstItem="529" secondItem="524" secondAttribute="bottom" constant="6" id="cg-14"/>
+                <constraint firstAttribute="leading" firstItem="rec-pref-1" secondItem="150" secondAttribute="leading" constant="16" id="cg-15"/>
+                <constraint firstAttribute="trailing" firstItem="150" relation="greaterThanOrEqual" secondItem="rec-pref-1" secondAttribute="trailing" constant="16" id="cg-16"/>
+                <constraint firstAttribute="top" firstItem="rec-pref-1" secondItem="529" secondAttribute="bottom" constant="34" id="cg-17"/>
+                <constraint firstAttribute="top" firstItem="rec-format-label" secondItem="rec-pref-1" secondAttribute="bottom" constant="10" id="cg-18"/>
+                <constraint firstAttribute="leading" firstItem="rec-format-label" secondItem="150" secondAttribute="leading" constant="16" id="cg-19"/>
+                <constraint firstAttribute="leading" firstItem="rec-format-popup" secondItem="rec-format-label" secondAttribute="trailing" constant="8" id="cg-20"/>
+                <constraint firstAttribute="centerY" firstItem="rec-format-popup" secondItem="rec-format-label" secondAttribute="centerY" id="cg-21"/>
+                <constraint firstAttribute="width" firstItem="rec-format-popup" relation="greaterThanOrEqual" constant="220" id="cg-22"/>
+                <constraint firstAttribute="trailing" firstItem="150" relation="greaterThanOrEqual" secondItem="rec-format-popup" secondAttribute="trailing" constant="16" id="cg-23"/>
+                <constraint firstAttribute="top" firstItem="rec-folder-label" secondItem="rec-format-label" secondAttribute="bottom" constant="16" id="cg-24"/>
+                <constraint firstAttribute="leading" firstItem="rec-folder-label" secondItem="150" secondAttribute="leading" constant="16" id="cg-25"/>
+                <constraint firstAttribute="leading" firstItem="rec-folder-field" secondItem="rec-folder-label" secondAttribute="trailing" constant="8" id="cg-26"/>
+                <constraint firstAttribute="centerY" firstItem="rec-folder-field" secondItem="rec-folder-label" secondAttribute="centerY" id="cg-27"/>
+                <constraint firstAttribute="width" firstItem="rec-folder-field" relation="greaterThanOrEqual" constant="180" id="cg-28"/>
+                <constraint firstAttribute="leading" firstItem="rec-folder-button" secondItem="rec-folder-field" secondAttribute="trailing" constant="8" id="cg-29"/>
+                <constraint firstAttribute="centerY" firstItem="rec-folder-button" secondItem="rec-folder-label" secondAttribute="centerY" id="cg-30"/>
+                <constraint firstAttribute="trailing" firstItem="150" secondItem="rec-folder-button" secondAttribute="trailing" constant="16" id="cg-31"/>
+                <constraint firstAttribute="bottom" firstItem="150" secondItem="rec-folder-button" secondAttribute="bottom" constant="18" id="cg-32"/>
+                <constraint firstItem="section-calling-heading" firstAttribute="leading" secondItem="150" secondAttribute="leading" constant="16" id="section-calling-constraint-1"/>
+                <constraint firstItem="section-calling-heading" firstAttribute="height" constant="16" id="section-calling-constraint-2"/>
+                <constraint firstItem="section-calling-line" firstAttribute="leading" secondItem="section-calling-heading" secondAttribute="trailing" constant="10" id="section-calling-constraint-3"/>
+                <constraint firstItem="section-calling-line" firstAttribute="trailing" secondItem="150" secondAttribute="trailing" constant="-16" id="section-calling-constraint-4"/>
+                <constraint firstItem="section-calling-line" firstAttribute="centerY" secondItem="section-calling-heading" secondAttribute="centerY" id="section-calling-constraint-5"/>
+                <constraint firstItem="section-calling-line" firstAttribute="height" constant="1" id="section-calling-constraint-6"/>
+                <constraint firstItem="section-calling-heading" firstAttribute="top" secondItem="150" secondAttribute="top" constant="10" id="section-calling-constraint-7"/>
+                <constraint firstItem="section-recording-heading" firstAttribute="leading" secondItem="150" secondAttribute="leading" constant="16" id="section-recording-constraint-1"/>
+                <constraint firstItem="section-recording-heading" firstAttribute="height" constant="16" id="section-recording-constraint-2"/>
+                <constraint firstItem="section-recording-line" firstAttribute="leading" secondItem="section-recording-heading" secondAttribute="trailing" constant="10" id="section-recording-constraint-3"/>
+                <constraint firstItem="section-recording-line" firstAttribute="trailing" secondItem="150" secondAttribute="trailing" constant="-16" id="section-recording-constraint-4"/>
+                <constraint firstItem="section-recording-line" firstAttribute="centerY" secondItem="section-recording-heading" secondAttribute="centerY" id="section-recording-constraint-5"/>
+                <constraint firstItem="section-recording-line" firstAttribute="height" constant="1" id="section-recording-constraint-6"/>
+                <constraint firstItem="section-recording-heading" firstAttribute="bottom" secondItem="rec-pref-1" secondAttribute="top" constant="-8" id="section-recording-constraint-7"/>
+            </constraints>
+            <point key="canvasLocation" x="332.5" y="454.5"/>
+        </customView>
+    </objects>
+</document>

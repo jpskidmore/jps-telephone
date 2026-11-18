@@ -1,0 +1,108 @@
+//
+//  AccountController.h
+//  Telephone
+//
+//  Copyright © 2008-2016 Alexey Kuznetsov
+//  Copyright © 2016-2022 64 Characters
+//
+//  Telephone is free software: you can redistribute it and/or modify
+//  it under the terms of the GNU General Public License as published by
+//  the Free Software Foundation, either version 3 of the License, or
+//  (at your option) any later version.
+//
+//  Telephone is distributed in the hope that it will be useful,
+//  but WITHOUT ANY WARRANTY; without even the implied warranty of
+//  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+//  GNU General Public License for more details.
+//
+
+@import Cocoa;
+
+#import "AKSIPAccount.h"
+
+#import "CallController.h"
+
+// Address Book label for SIP address in the email field.
+extern NSString * const kEmailSIPLabel;
+
+// Queue changes are delivered on the main thread without controller or URI payloads.
+FOUNDATION_EXPORT NSNotificationName const JPSPendingRoutedCallsDidChangeNotification;
+
+@class AKSIPURI, AKNetworkReachability, AKCredentialBroker, JPSDiallerContacts;
+@class CallTransferController, SanitizedCallDestination, WorkspaceSleepStatus;
+@protocol RingtonePlaybackUseCase;
+
+@interface AccountController : NSObject <AKSIPAccountDelegate, CallControllerDelegate>
+
+@property(nonatomic, readonly) AKSIPAccount *account;
+@property(nonatomic, strong, nullable) JPSDiallerContacts *contactCompletions;
+@property(nonatomic, readonly) id<RingtonePlaybackUseCase> ringtonePlayback;
+
+@property(nonatomic, getter=isEnabled) BOOL enabled;
+@property(nonatomic, readonly, getter=isAccountRegistered) BOOL accountRegistered;
+@property(nonatomic, readonly) NSMutableArray *callControllers;
+@property(nonatomic, readonly) NSString *accountDescription;
+@property(nonatomic) BOOL attemptingToRegisterAccount;
+@property(nonatomic) BOOL attemptingToUnregisterAccount;
+@property(nonatomic) BOOL shouldPresentRegistrationError;
+@property(nonatomic, getter=isAccountUnavailable) BOOL accountUnavailable;
+@property(nonatomic, readonly) AKNetworkReachability *registrarReachability;
+@property(nonatomic) BOOL substitutesPlusCharacter;
+@property(nonatomic, copy) NSString *plusCharacterSubstitution;
+@property(nonatomic) BOOL callsShouldDisplayAccountInfo;
+@property(nonatomic, readonly) BOOL canMakeCalls;
+@property(nonatomic, readonly) NSString *routingAvailability;
+@property(nonatomic, readonly) NSString *accountUUID;
+@property(nonatomic, readonly) BOOL hasPendingRoutedCalls;
+// Immutable enqueue-time string values: id, accountUUID, providerName and destination.
+@property(nonatomic, readonly) NSArray<NSDictionary<NSString *, NSString *> *> *pendingRoutedCallSummaries;
+- (BOOL)cancelPendingRoutedCallWithIdentifier:(NSString *)identifier;
+- (void)cancelPendingRoutedCalls;
+- (void)changeRoutingAvailability:(NSString *)availability;
+- (void)makeRoutedCallToURI:(AKSIPURI *)uri phoneLabel:(NSString *)phoneLabel canonicalDestination:(nullable NSString *)canonicalDestination;
+
+
+- (instancetype)initWithSIPAccount:(AKSIPAccount *)account
+                accountDescription:(NSString *)accountDescription
+                         userAgent:(AKSIPUserAgent *)userAgent
+                  ringtonePlayback:(id<RingtonePlaybackUseCase>)ringtonePlayback
+                       sleepStatus:(WorkspaceSleepStatus *)sleepStatus;
+
+// Credential requests are fenced independently of native SIP operations.
+@property(nonatomic, readonly) NSUInteger credentialAccessGeneration;
+@property(nonatomic, readonly) BOOL credentialAccessSuspended;
+- (AKCredentialBroker *)credentialBroker;
+- (void)invalidateCredentialAccess;
+- (void)setCredentialAccessSuspended:(BOOL)suspended;
+- (void)registerAccount;
+- (void)resumeRegistrationIfDesired;
+- (void)unregisterAccount;
+
+- (void)removeAccountFromUserAgent;
+- (void)removeAccountFromUserAgentWithCompletion:(void (^)(BOOL removed))completion;
+
+// Makes a call to a given destination URI with a given phone label.
+// When |callTransferController| is not nil, no new window will be created, existing |callTransferController| will be
+// used instead. Host part of the |destinationURI| can be empty, in which case host part from the account's
+// |uri| will be taken.
+- (void)makeCallToURI:(AKSIPURI *)destinationURI
+        phoneLabel:(NSString *)phoneLabel
+        callTransferController:(CallTransferController *)callTransferController;
+
+- (void)makeCallToURI:(AKSIPURI *)destinationURI phoneLabel:(NSString *)phoneLabel;
+
+- (void)makeCallToDestinationRegisteringAccountIfNeeded:(SanitizedCallDestination *)destination;
+
+- (void)showWindow;
+- (void)showWindowWithoutMakingKey;
+- (void)hideWindow;
+- (BOOL)isWindowKey;
+- (void)orderWindow:(NSWindowOrderingMode)place relativeTo:(NSInteger)otherWindow;
+- (NSInteger)windowNumber;
+
+- (void)showRegistrarConnectionErrorSheetWithError:(NSString *)error;
+
+- (void)showUnavailableState;
+- (void)showConnectingState;
+
+@end
