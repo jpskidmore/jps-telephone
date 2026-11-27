@@ -14,10 +14,10 @@ concurrency:
 jobs:
   build:
     if: github.repository == 'jpskidmore/jps-telephone'
-    runs-on: macos-15
+    runs-on: xcode-27
     timeout-minutes: 35
     env:
-      DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
+      DEVELOPER_DIR: /Applications/Xcode_27.2.app/Contents/Developer
     steps:
       - name: Check out exact source
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
