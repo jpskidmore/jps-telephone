@@ -19,6 +19,7 @@
 #import "AKSIPUserAgent.h"
 #import "AKAudioDeviceController.h"
 #import <CoreAudio/AudioHardwareBase.h>
+#import <netinet/in.h>
 #import <pjmedia-audiodev/errno.h>
 
 // The Foundation-only policy/harness use these audited numeric constants. Fail
@@ -39,6 +40,16 @@ _Static_assert(kAudioHardwareNotRunningError == 1937010544, "Review CoreAudio st
 #import "Telephone-Swift.h"
 
 #define THIS_FILE "AKSIPUserAgent.m"
+
+// Dedicated IPv6 test build. Prevent IPv4-mapped peers on IPv6 sockets.
+static void AKRequireIPv6Socket(pj_sockopt_params *options) {
+    static int enabled = 1;
+    options->cnt = 1;
+    options->options[0].level = IPPROTO_IPV6;
+    options->options[0].optname = IPV6_V6ONLY;
+    options->options[0].optval = &enabled;
+    options->options[0].optlen = sizeof(enabled);
+}
 
 enum {
   kAKRingbackFrequency1  = 440,
@@ -114,11 +125,8 @@ static const BOOL kAKSIPUserAgentDefaultLocksCodec = YES;
 @property(nonatomic, assign) NSInteger ringbackCount;
 
 // Transport identifiers.
-@property(nonatomic) pjsua_transport_id UDP4TransportIdentifier;
 @property(nonatomic) pjsua_transport_id UDP6TransportIdentifier;
-@property(nonatomic) pjsua_transport_id TCP4TransportIdentifier;
 @property(nonatomic) pjsua_transport_id TCP6TransportIdentifier;
-@property(nonatomic) pjsua_transport_id TLS4TransportIdentifier;
 @property(nonatomic) pjsua_transport_id TLS6TransportIdentifier;
 
 @property(nonatomic, readonly) NSThread *thread;
@@ -308,11 +316,8 @@ static const BOOL kAKSIPUserAgentDefaultLocksCodec = YES;
     [self setLocksCodec:kAKSIPUserAgentDefaultLocksCodec];
     
     [self setRingbackSlot:PJSUA_INVALID_ID];
-    [self setUDP4TransportIdentifier:PJSUA_INVALID_ID];
     [self setUDP6TransportIdentifier:PJSUA_INVALID_ID];
-    [self setTCP4TransportIdentifier:PJSUA_INVALID_ID];
     [self setTCP6TransportIdentifier:PJSUA_INVALID_ID];
-    [self setTLS4TransportIdentifier:PJSUA_INVALID_ID];
     [self setTLS6TransportIdentifier:PJSUA_INVALID_ID];
 
     _parser = [[AKSIPURIParser alloc] initWithUserAgent:self];
@@ -425,18 +430,6 @@ static const BOOL kAKSIPUserAgentDefaultLocksCodec = YES;
         }
     }
 
-    if ([[self STUNServerHost] length] > 0) {
-        userAgentConfig.stun_srv_cnt = 1;
-
-        if ([self STUNServerPort] == kAKSIPUserAgentDefaultSTUNServerPort) {
-            userAgentConfig.stun_srv[0] = [[ServiceAddress alloc] initWithHost:self.STUNServerHost].stringValue.pjString;
-        } else {
-            userAgentConfig.stun_srv[0] = [[ServiceAddress alloc] initWithHost:self.STUNServerHost
-                                                                          port:@(self.STUNServerPort).stringValue].stringValue.pjString;
-        }
-    }
-    userAgentConfig.stun_try_ipv6 = PJ_TRUE;
-
     userAgentConfig.user_agent = [[self userAgentString] pjString];
 
     if ([[self logFileName] length] > 0) {
@@ -446,7 +439,8 @@ static const BOOL kAKSIPUserAgentDefaultLocksCodec = YES;
     loggingConfig.level = (unsigned)[self logLevel];
     loggingConfig.console_level = (unsigned)[self consoleLogLevel];
     mediaConfig.no_vad = ![self detectsVoiceActivity];
-    mediaConfig.enable_ice = [self usesICE];
+    // Use native IPv6 for this test without STUN or ICE candidates.
+    mediaConfig.enable_ice = PJ_FALSE;
     mediaConfig.snd_auto_close_time = 1;
     mediaConfig.ec_options = PJMEDIA_ECHO_USE_SW_ECHO;
 
@@ -456,6 +450,7 @@ static const BOOL kAKSIPUserAgentDefaultLocksCodec = YES;
     }
 
     transportConfig.port = (unsigned)[self transportPort];
+    AKRequireIPv6Socket(&transportConfig.sockopt_params);
 
     userAgentConfig.cb.on_incoming_call = &PJSUAOnIncomingCall;
     userAgentConfig.cb.on_call_state = &PJSUAOnCallState;
@@ -524,46 +519,29 @@ static const BOOL kAKSIPUserAgentDefaultLocksCodec = YES;
 
     [self setRingbackSlot:aRingbackSlot];
 
-    // Add UDP4 transport.
-    pjsua_transport_id UDP4TransportIdentifier = PJSUA_INVALID_ID;
-    status = pjsua_transport_create(PJSIP_TRANSPORT_UDP, &transportConfig, &UDP4TransportIdentifier);
+    // UDP6 is the first transport and supplies the port for TCP6.
+    pjsua_transport_id UDP6TransportIdentifier = PJSUA_INVALID_ID;
+    status = pjsua_transport_create(PJSIP_TRANSPORT_UDP6, &transportConfig, &UDP6TransportIdentifier);
     if (status != PJ_SUCCESS) {
-        NSLog(@"Error creating UDP4 transport");
+        pjsua_perror(THIS_FILE, "IPv6-only test: error creating UDP6 transport", status);
         [self thread_stop];
         [self thread_callOnMain:completion withFlag:NO];
         return;
     }
-    self.UDP4TransportIdentifier = UDP4TransportIdentifier;
-
-    // Get UDP4 transport port chosen by PJSUA.
-    if ([self transportPort] == 0) {
-        pjsua_transport_info transportInfo;
-        status = pjsua_transport_get_info(UDP4TransportIdentifier, &transportInfo);
-        if (status != PJ_SUCCESS) {
-            NSLog(@"Error getting UDP4 transport info");
-        }
-        
-        [self setTransportPort:transportInfo.local_name.port];
-        
-        // Set chosen port back to transportConfig to add TCP transport below.
-        transportConfig.port = (unsigned)[self transportPort];
-    }
-
-    // Add UDP6 transport.
-    pjsua_transport_id UDP6TransportIdentifier = PJSUA_INVALID_ID;
-    status = pjsua_transport_create(PJSIP_TRANSPORT_UDP6, &transportConfig, &UDP6TransportIdentifier);
-    if (status != PJ_SUCCESS) {
-        NSLog(@"Error creating UDP6 transport");
-    }
     self.UDP6TransportIdentifier = UDP6TransportIdentifier;
 
-    // Add TCP4 transport.
-    pjsua_transport_id TCP4TransportIdentifier = PJSUA_INVALID_ID;
-    status = pjsua_transport_create(PJSIP_TRANSPORT_TCP, &transportConfig, &TCP4TransportIdentifier);
-    if (status != PJ_SUCCESS) {
-        NSLog(@"Error creating TCP4 transport");
+    if (transportConfig.port == 0) {
+        pjsua_transport_info transportInfo;
+        status = pjsua_transport_get_info(UDP6TransportIdentifier, &transportInfo);
+        if (status != PJ_SUCCESS) {
+            pjsua_perror(THIS_FILE, "IPv6-only test: error getting UDP6 port", status);
+            [self thread_stop];
+            [self thread_callOnMain:completion withFlag:NO];
+            return;
+        }
+        self.transportPort = transportInfo.local_name.port;
+        transportConfig.port = (unsigned)self.transportPort;
     }
-    self.TCP4TransportIdentifier = TCP4TransportIdentifier;
 
     // Add TCP6 transport.
     pjsua_transport_id TCP6TransportIdentifier = PJSUA_INVALID_ID;
@@ -579,12 +557,7 @@ static const BOOL kAKSIPUserAgentDefaultLocksCodec = YES;
     NSURL *cert = [NSBundle.mainBundle URLForResource:@"PublicCAs" withExtension:@"pem"];
     transportConfig.tls_setting.ca_list_file = cert.path.pjString;
     transportConfig.port++;
-    pjsua_transport_id TLS4TransportIdentifier = PJSUA_INVALID_ID;
-    status = pjsua_transport_create(PJSIP_TRANSPORT_TLS, &transportConfig, &TLS4TransportIdentifier);
-    if (status != PJ_SUCCESS) {
-        NSLog(@"Error creating TLS4 transport");
-    }
-    self.TLS4TransportIdentifier = TLS4TransportIdentifier;
+    AKRequireIPv6Socket(&transportConfig.tls_setting.sockopt_params);
 
     // Add TLS6 transport.
     pjsua_transport_id TLS6TransportIdentifier = PJSUA_INVALID_ID;
@@ -593,6 +566,8 @@ static const BOOL kAKSIPUserAgentDefaultLocksCodec = YES;
         NSLog(@"Error creating TLS6 transport");
     }
     self.TLS6TransportIdentifier = TLS6TransportIdentifier;
+
+    PJ_LOG(3, (THIS_FILE, "IPv6-only test: SIP, RTP and RTCP require IPv6"));
 
     // Update codecs.
     [self updateCodecs];
@@ -701,11 +676,8 @@ static const BOOL kAKSIPUserAgentDefaultLocksCodec = YES;
         pjmedia_port_destroy(self.ringbackPort);
         self.ringbackPort = NULL;
     }
-    self.UDP4TransportIdentifier = PJSUA_INVALID_ID;
     self.UDP6TransportIdentifier = PJSUA_INVALID_ID;
-    self.TCP4TransportIdentifier = PJSUA_INVALID_ID;
     self.TCP6TransportIdentifier = PJSUA_INVALID_ID;
-    self.TLS4TransportIdentifier = PJSUA_INVALID_ID;
     self.TLS6TransportIdentifier = PJSUA_INVALID_ID;
     if (self.pool) {
         pj_pool_release(self.pool);
@@ -773,6 +745,9 @@ static const BOOL kAKSIPUserAgentDefaultLocksCodec = YES;
     accountConfig.cred_info[0].data = [aPassword pjString];
     
     accountConfig.rtp_cfg.port = 4000;
+    // Reject a fallback that tries to bind the media transport as IPv4.
+    accountConfig.rtp_cfg.bound_addr = pj_str("::");
+    AKRequireIPv6Socket(&accountConfig.rtp_cfg.sockopt_params);
 
     if (self.usesQoS) {
         accountConfig.rtp_cfg.qos_params.flags = PJ_QOS_PARAM_HAS_DSCP;
@@ -794,15 +769,16 @@ static const BOOL kAKSIPUserAgentDefaultLocksCodec = YES;
     
     accountConfig.reg_timeout = (unsigned)[anAccount reregistrationTime];
     
+    accountConfig.transport_id = PJSUA_INVALID_ID;
     switch (anAccount.transport) {
         case TransportUDP:
-            accountConfig.transport_id = anAccount.usesIPv6 ? self.UDP6TransportIdentifier : self.UDP4TransportIdentifier;
+            accountConfig.transport_id = self.UDP6TransportIdentifier;
             break;
         case TransportTCP:
-            accountConfig.transport_id = anAccount.usesIPv6 ? self.TCP6TransportIdentifier : self.TCP4TransportIdentifier;
+            accountConfig.transport_id = self.TCP6TransportIdentifier;
             break;
         case TransportTLS:
-            accountConfig.transport_id = anAccount.usesIPv6 ? self.TLS6TransportIdentifier : self.TLS4TransportIdentifier;
+            accountConfig.transport_id = self.TLS6TransportIdentifier;
             break;
         default:
             break;
@@ -810,7 +786,13 @@ static const BOOL kAKSIPUserAgentDefaultLocksCodec = YES;
 
     accountConfig.use_srtp = anAccount.transport == TransportTLS ? PJMEDIA_SRTP_MANDATORY : PJMEDIA_SRTP_DISABLED;
 
-    accountConfig.ipv6_media_use = anAccount.usesIPv6 ? PJSUA_IPV6_ENABLED : PJSUA_IPV6_DISABLED;
+    if (accountConfig.transport_id == PJSUA_INVALID_ID) {
+        pjsua_perror(THIS_FILE, "IPv6-only test: account transport unavailable", PJSIP_EUNSUPTRANSPORT);
+        return PJSIP_EUNSUPTRANSPORT;
+    }
+
+    accountConfig.ipv6_sip_use = PJSUA_IPV6_ENABLED_USE_IPV6_ONLY;
+    accountConfig.ipv6_media_use = PJSUA_IPV6_ENABLED_USE_IPV6_ONLY;
 
     accountConfig.allow_contact_rewrite = anAccount.updatesContactHeader ? PJ_TRUE : PJ_FALSE;
     accountConfig.allow_via_rewrite = anAccount.updatesViaHeader ? PJ_TRUE : PJ_FALSE;
