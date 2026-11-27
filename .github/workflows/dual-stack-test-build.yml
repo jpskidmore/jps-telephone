@@ -18,7 +18,6 @@ jobs:
     timeout-minutes: 35
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
-      JPS_LOCAL_BUILD_DIR: ${{ runner.temp }}/jps-dual-stack
     steps:
       - name: Check out exact source
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
@@ -34,6 +33,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          export JPS_LOCAL_BUILD_DIR="${RUNNER_TEMP}/jps-dual-stack"
           ./Scripts/build-test-release.sh 2>&1 | tee "${RUNNER_TEMP}/jps-dual-stack.log"
       - name: Upload test results
         if: always()
