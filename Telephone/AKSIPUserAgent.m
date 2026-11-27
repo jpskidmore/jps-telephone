@@ -810,7 +810,15 @@ static const BOOL kAKSIPUserAgentDefaultLocksCodec = YES;
 
     accountConfig.use_srtp = anAccount.transport == TransportTLS ? PJMEDIA_SRTP_MANDATORY : PJMEDIA_SRTP_DISABLED;
 
-    accountConfig.ipv6_media_use = anAccount.usesIPv6 ? PJSUA_IPV6_ENABLED : PJSUA_IPV6_DISABLED;
+    // Keep SIP resolution on the same address family as the bound transport.
+    accountConfig.ipv6_sip_use = anAccount.usesIPv6
+        ? PJSUA_IPV6_ENABLED_USE_IPV6_ONLY
+        : PJSUA_IPV6_DISABLED;
+
+    // Prefer IPv6 in outgoing SDP while still accepting IPv4 media from the peer.
+    accountConfig.ipv6_media_use = anAccount.usesIPv6
+        ? PJSUA_IPV6_ENABLED_PREFER_IPV6
+        : PJSUA_IPV6_DISABLED;
 
     accountConfig.allow_contact_rewrite = anAccount.updatesContactHeader ? PJ_TRUE : PJ_FALSE;
     accountConfig.allow_via_rewrite = anAccount.updatesViaHeader ? PJ_TRUE : PJ_FALSE;
