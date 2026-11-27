@@ -1,0 +1,12 @@
+--- a/pjlib/src/pj/os_core_unix.c
++++ b/pjlib/src/pj/os_core_unix.c
+@@ -1189,7 +1189,8 @@
+ #endif
+     pj_atomic_t *atomic_var;
+ 
+-    atomic_var = PJ_POOL_ZALLOC_T(pool, pj_atomic_t);
++    atomic_var = pj_pool_aligned_alloc(pool, _Alignof(pj_atomic_t),
++                                       sizeof(pj_atomic_t));
+ 
+     PJ_ASSERT_RETURN(atomic_var, PJ_ENOMEM);
+ 

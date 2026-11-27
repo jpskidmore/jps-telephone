@@ -179,7 +179,6 @@ NS_ASSUME_NONNULL_END
         self.proxyPort = [dict[AKSIPAccountKeys.proxyPort] integerValue];
     }
     self.reregistrationTime = [dict[AKSIPAccountKeys.reregistrationTime] integerValue];
-    _usesIPv6 = [dict[AKSIPAccountKeys.ipVersion] isEqualToString:AKSIPAccountKeys.ipVersion6];
     _updatesContactHeader = [dict[AKSIPAccountKeys.updateContactHeader] boolValue];
     _updatesViaHeader = [dict[AKSIPAccountKeys.updateViaHeader] boolValue];
     _updatesSDP = [dict[AKSIPAccountKeys.updateSDP] boolValue];

@@ -17,6 +17,7 @@
 //
 
 #import "AKSIPUserAgent.h"
+#import "AKSIPPreferredAddressFamily.h"
 #import "AKAudioDeviceController.h"
 #import <CoreAudio/AudioHardwareBase.h>
 #import <pjmedia-audiodev/errno.h>
@@ -794,23 +795,38 @@ static const BOOL kAKSIPUserAgentDefaultLocksCodec = YES;
     
     accountConfig.reg_timeout = (unsigned)[anAccount reregistrationTime];
     
+    pjsua_transport_id transport4 = PJSUA_INVALID_ID;
+    pjsua_transport_id transport6 = PJSUA_INVALID_ID;
     switch (anAccount.transport) {
         case TransportUDP:
-            accountConfig.transport_id = anAccount.usesIPv6 ? self.UDP6TransportIdentifier : self.UDP4TransportIdentifier;
+            transport4 = self.UDP4TransportIdentifier;
+            transport6 = self.UDP6TransportIdentifier;
             break;
         case TransportTCP:
-            accountConfig.transport_id = anAccount.usesIPv6 ? self.TCP6TransportIdentifier : self.TCP4TransportIdentifier;
+            transport4 = self.TCP4TransportIdentifier;
+            transport6 = self.TCP6TransportIdentifier;
             break;
         case TransportTLS:
-            accountConfig.transport_id = anAccount.usesIPv6 ? self.TLS6TransportIdentifier : self.TLS4TransportIdentifier;
-            break;
-        default:
+            transport4 = self.TLS4TransportIdentifier;
+            transport6 = self.TLS6TransportIdentifier;
             break;
     }
 
-    accountConfig.use_srtp = anAccount.transport == TransportTLS ? PJMEDIA_SRTP_MANDATORY : PJMEDIA_SRTP_DISABLED;
+    NSString *nextHop = self.outboundProxyHost;
+    if (nextHop.length == 0) {
+        nextHop = anAccount.proxyHost.length > 0 ? anAccount.proxyHost : anAccount.registrar.host;
+    }
+    ServiceAddress *address = [[ServiceAddress alloc] initWithString:nextHop ?: @""];
+    BOOL useIPv6 = transport6 != PJSUA_INVALID_ID && AKSIPHostHasIPv6Route(address.host.UTF8String);
+    accountConfig.transport_id = useIPv6 ? transport6 : transport4;
+    if (accountConfig.transport_id == PJSUA_INVALID_ID) {
+        return PJSIP_EUNSUPTRANSPORT;
+    }
 
-    accountConfig.ipv6_media_use = anAccount.usesIPv6 ? PJSUA_IPV6_ENABLED : PJSUA_IPV6_DISABLED;
+    accountConfig.use_srtp = anAccount.transport == TransportTLS ? PJMEDIA_SRTP_MANDATORY : PJMEDIA_SRTP_DISABLED;
+    // The initial SDP offer is built before SIP transport resolution.
+    accountConfig.ipv6_sip_use = useIPv6 ? PJSUA_IPV6_ENABLED_USE_IPV6_ONLY : PJSUA_IPV6_DISABLED;
+    accountConfig.ipv6_media_use = accountConfig.ipv6_sip_use;
 
     accountConfig.allow_contact_rewrite = anAccount.updatesContactHeader ? PJ_TRUE : PJ_FALSE;
     accountConfig.allow_via_rewrite = anAccount.updatesViaHeader ? PJ_TRUE : PJ_FALSE;

@@ -296,8 +296,6 @@
     XCTAssertNotNil(account.UDPButton);
     XCTAssertNotNil(account.TCPButton);
     XCTAssertNotNil(account.TLSButton);
-    XCTAssertNotNil(account.IPv4Button);
-    XCTAssertNotNil(account.IPv6Button);
 
     [controller changeView:controller.networkToolbarItem];
     XCTAssertEqualObjects(window.title, NSLocalizedString(@"Network — All Accounts", nil));

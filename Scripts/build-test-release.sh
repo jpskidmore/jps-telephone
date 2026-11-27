@@ -12,6 +12,7 @@ xcodebuild -list -project Telephone.xcodeproj >/dev/null
 xcodebuild -version
 xcrun --sdk macosx --show-sdk-version
 ./Scripts/verify-vendor-security.sh
+python3 Tests/test_sip_loopback_dial.py
 python3 Tests/test_audio_recovery_integration.py
 python3 Tests/test_recording_lifecycle_model.py
 ./Scripts/run-audio-device-tests.sh

@@ -79,7 +79,6 @@ extern const NSInteger kAKSIPAccountRegistrationExpireTimeNotSpecified;
 @property(nonatomic, readonly) Transport transport;
 
 /// A Boolean value indicating if IPv6 should be used.
-@property(nonatomic, readonly) BOOL usesIPv6;
 
 /// A Boolean value indicating if Contact header should be automatically updated.
 ///
