@@ -8,8 +8,6 @@
     <objects>
         <customObject id="-2" userLabel="File's Owner" customClass="AccountPreferencesViewController">
             <connections>
-                <outlet property="IPv4Button" destination="xf9-ce-jif" id="LnC-49-nHE"/>
-                <outlet property="IPv6Button" destination="INe-5P-bRu" id="7hZ-dh-2uF"/>
                 <outlet property="SIPAddressField" destination="96" id="512"/>
                 <outlet property="TCPButton" destination="Ify-XP-VVA" id="I0A-Eq-ORq"/>
                 <outlet property="TLSButton" destination="gHr-pY-4ah" id="eNt-I9-O0R"/>
@@ -359,36 +357,6 @@
                                             <color key="backgroundColor" name="textBackgroundColor" catalog="System" colorSpace="catalog"/>
                                         </textFieldCell>
                                     </textField>
-                                    <button verticalHuggingPriority="750" translatesAutoresizingMaskIntoConstraints="NO" id="xf9-ce-jif">
-                                        <rect key="frame" x="114" y="99.5" width="45" height="15"/>
-                                        <buttonCell key="cell" type="radio" title="IPv4" bezelStyle="regularSquare" imagePosition="left" alignment="left" controlSize="small" inset="2" id="s73-C1-OzC">
-                                            <behavior key="behavior" changeContents="YES" doesNotDimImage="YES" lightByContents="YES"/>
-                                            <font key="font" metaFont="menu" size="11"/>
-                                        </buttonCell>
-                                        <connections>
-                                            <action selector="changeIPVersion:" target="-2" id="laA-Ld-yOf"/>
-                                            <outlet property="nextKeyView" destination="INe-5P-bRu" id="7BO-4P-aXu"/>
-                                        </connections>
-                                    </button>
-                                    <button verticalHuggingPriority="750" translatesAutoresizingMaskIntoConstraints="NO" id="INe-5P-bRu">
-                                        <rect key="frame" x="114" y="77.5" width="45" height="15"/>
-                                        <buttonCell key="cell" type="radio" title="IPv6" bezelStyle="regularSquare" imagePosition="left" alignment="left" controlSize="small" inset="2" id="1o3-z9-WKa">
-                                            <behavior key="behavior" changeContents="YES" doesNotDimImage="YES" lightByContents="YES"/>
-                                            <font key="font" metaFont="menu" size="11"/>
-                                        </buttonCell>
-                                        <connections>
-                                            <action selector="changeIPVersion:" target="-2" id="Mdi-7o-1ht"/>
-                                            <outlet property="nextKeyView" destination="4L8-E6-lKd" id="Yya-dg-5Ug"/>
-                                        </connections>
-                                    </button>
-                                    <textField horizontalHuggingPriority="251" verticalHuggingPriority="750" translatesAutoresizingMaskIntoConstraints="NO" id="Miv-Fk-KKm">
-                                        <rect key="frame" x="50" y="100" width="60" height="14"/>
-                                        <textFieldCell key="cell" controlSize="small" lineBreakMode="clipping" title="IP Version:" id="z2G-4l-57d">
-                                            <font key="font" metaFont="menu" size="11"/>
-                                            <color key="textColor" name="labelColor" catalog="System" colorSpace="catalog"/>
-                                            <color key="backgroundColor" name="textBackgroundColor" catalog="System" colorSpace="catalog"/>
-                                        </textFieldCell>
-                                    </textField>
                                     <button translatesAutoresizingMaskIntoConstraints="NO" id="4L8-E6-lKd">
                                         <rect key="frame" x="114" y="43" width="118" height="16"/>
                                         <buttonCell key="cell" type="check" title="Update IP address" bezelStyle="regularSquare" imagePosition="left" controlSize="small" inset="2" id="JLI-nw-iSd">
@@ -415,7 +383,7 @@
                                         </buttonCell>
                                         <connections>
                                             <action selector="changeTransport:" target="-2" id="eDt-fT-dSI"/>
-                                            <outlet property="nextKeyView" destination="xf9-ce-jif" id="g05-vT-pvP"/>
+                                            <outlet property="nextKeyView" destination="4L8-E6-lKd" id="g05-vT-pvP"/>
                                         </connections>
                                     </button>
                                 </subviews>
@@ -444,16 +412,8 @@
                                     <constraint firstAttribute="leading" firstItem="gHr-pY-4ah" secondItem="Ify-XP-VVA" secondAttribute="trailing" constant="12" id="can-22"/>
                                     <constraint firstAttribute="firstBaseline" firstItem="gHr-pY-4ah" secondItem="Ify-XP-VVA" secondAttribute="firstBaseline" id="can-23"/>
                                     <constraint firstAttribute="trailing" firstItem="XxC-OI-tYb" relation="greaterThanOrEqual" secondItem="gHr-pY-4ah" secondAttribute="trailing" constant="12" id="can-24"/>
-                                    <constraint firstAttribute="top" firstItem="xf9-ce-jif" secondItem="iBU-Gy-PuJ" secondAttribute="bottom" constant="14" id="can-25"/>
-                                    <constraint firstAttribute="leading" firstItem="xf9-ce-jif" secondItem="iBU-Gy-PuJ" secondAttribute="leading" id="can-26"/>
-                                    <constraint firstAttribute="leading" firstItem="Miv-Fk-KKm" relation="greaterThanOrEqual" secondItem="XxC-OI-tYb" secondAttribute="leading" constant="12" id="can-27"/>
-                                    <constraint firstAttribute="trailing" firstItem="Miv-Fk-KKm" secondItem="xf9-ce-jif" secondAttribute="leading" constant="-7" id="can-28"/>
-                                    <constraint firstAttribute="firstBaseline" firstItem="Miv-Fk-KKm" secondItem="xf9-ce-jif" secondAttribute="firstBaseline" id="can-29"/>
-                                    <constraint firstAttribute="leading" firstItem="INe-5P-bRu" secondItem="xf9-ce-jif" secondAttribute="trailing" constant="12" id="can-30"/>
-                                    <constraint firstAttribute="firstBaseline" firstItem="INe-5P-bRu" secondItem="xf9-ce-jif" secondAttribute="firstBaseline" id="can-31"/>
-                                    <constraint firstAttribute="trailing" firstItem="XxC-OI-tYb" relation="greaterThanOrEqual" secondItem="INe-5P-bRu" secondAttribute="trailing" constant="12" id="can-32"/>
                                     <constraint firstAttribute="leading" firstItem="4L8-E6-lKd" secondItem="1UL-lr-59v" secondAttribute="leading" id="can-33"/>
-                                    <constraint firstAttribute="top" firstItem="4L8-E6-lKd" secondItem="xf9-ce-jif" secondAttribute="bottom" constant="14" id="can-34"/>
+                                    <constraint firstAttribute="top" firstItem="4L8-E6-lKd" secondItem="gHr-pY-4ah" secondAttribute="bottom" constant="14" id="can-34"/>
                                     <constraint firstAttribute="leading" firstItem="uyP-rU-EtH" secondItem="4L8-E6-lKd" secondAttribute="leading" id="can-35"/>
                                     <constraint firstAttribute="top" firstItem="uyP-rU-EtH" secondItem="4L8-E6-lKd" secondAttribute="bottom" constant="6" id="can-36"/>
                                     <constraint firstAttribute="trailing" firstItem="XxC-OI-tYb" secondItem="uyP-rU-EtH" secondAttribute="trailing" constant="12" id="can-37"/>

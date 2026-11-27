@@ -462,8 +462,6 @@ static const NSUInteger kAccountsMax = 32;
             [[self UDPButton] setEnabled:NO];
             [[self TCPButton] setEnabled:NO];
             [[self TLSButton] setEnabled:NO];
-            [[self IPv4Button] setEnabled:NO];
-            [[self IPv6Button] setEnabled:NO];
             [[self updateIPAddressCheckBox] setEnabled:NO];
 
         } else {
@@ -499,8 +497,6 @@ static const NSUInteger kAccountsMax = 32;
             [[self UDPButton] setEnabled:YES];
             [[self TCPButton] setEnabled:YES];
             [[self TLSButton] setEnabled:YES];
-            [[self IPv4Button] setEnabled:YES];
-            [[self IPv6Button] setEnabled:YES];
             [[self updateIPAddressCheckBox] setEnabled:YES];
         }
         
@@ -602,12 +598,6 @@ static const NSUInteger kAccountsMax = 32;
         }
         [self updateProxyPortFieldPlaceholder];
 
-        // Update IP Version.
-        if ([accountDict[AKSIPAccountKeys.ipVersion] isEqualToString:AKSIPAccountKeys.ipVersion6]) {
-            [[self IPv6Button] setState:NSControlStateValueOn];
-        } else {
-            [[self IPv4Button] setState:NSControlStateValueOn];
-        }
         
         // Update headers checkbox.
         if ([accountDict[AKSIPAccountKeys.updateContactHeader] boolValue] &&
@@ -647,8 +637,6 @@ static const NSUInteger kAccountsMax = 32;
         [[self UDPButton] setState:NSControlStateValueOff];
         [[self TCPButton] setState:NSControlStateValueOff];
         [[self TLSButton] setState:NSControlStateValueOff];
-        [[self IPv4Button] setState:NSControlStateValueOff];
-        [[self IPv6Button] setState:NSControlStateValueOff];
         [[self updateIPAddressCheckBox] setState:NSControlStateValueOff];
 
         [[self accountEnabledCheckBox] setEnabled:NO];
@@ -671,8 +659,6 @@ static const NSUInteger kAccountsMax = 32;
         [[self UDPButton] setEnabled:NO];
         [[self TCPButton] setEnabled:NO];
         [[self TLSButton] setEnabled:NO];
-        [[self IPv4Button] setEnabled:NO];
-        [[self IPv6Button] setEnabled:NO];
         [[self updateIPAddressCheckBox] setEnabled:NO];
     }
 }
@@ -815,7 +801,6 @@ static const NSUInteger kAccountsMax = 32;
             accountDict[AKSIPAccountKeys.transport] = AKSIPAccountKeys.transportUDP;
         }
 
-        accountDict[AKSIPAccountKeys.ipVersion] = self.IPv6Button.state == NSControlStateValueOn ? AKSIPAccountKeys.ipVersion6 : AKSIPAccountKeys.ipVersion4;
 
         if (self.updateIPAddressCheckBox.state == NSControlStateValueOn) {
             accountDict[AKSIPAccountKeys.updateContactHeader] = @YES;
@@ -869,8 +854,6 @@ static const NSUInteger kAccountsMax = 32;
         [[self UDPButton] setEnabled:NO];
         [[self TCPButton] setEnabled:NO];
         [[self TLSButton] setEnabled:NO];
-        [[self IPv4Button] setEnabled:NO];
-        [[self IPv6Button] setEnabled:NO];
         [[self updateIPAddressCheckBox] setEnabled:NO];
 
         // Mark accounts table as needing redisplay.
@@ -904,8 +887,6 @@ static const NSUInteger kAccountsMax = 32;
         [[self UDPButton] setEnabled:YES];
         [[self TCPButton] setEnabled:YES];
         [[self TLSButton] setEnabled:YES];
-        [[self IPv4Button] setEnabled:YES];
-        [[self IPv6Button] setEnabled:YES];
         [[self updateIPAddressCheckBox] setEnabled:YES];
     }
     
@@ -954,7 +935,6 @@ static const NSUInteger kAccountsMax = 32;
 }
 
 // Group radio buttons by providing them the same action.
-- (IBAction)changeIPVersion:(id)sender {}
 
 
 #pragma mark -
