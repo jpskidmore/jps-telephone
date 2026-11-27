@@ -1,5 +1,9 @@
 # Current maintenance entry point
 
+## Build and storage workflow
+
+Use the local Macs for compilation, testing, ad-hoc signing, packaging and ZIP verification. Record the source commit, Xcode version and checksum. Use GitHub for source review and storage of locally built release assets. Run GitHub Actions builds only when explicitly requested.
+
 Start here for current work on jps Telephone. Release archives and dated test
 records describe their original builds; later documentation commits do not
 replace those archives or certify a changed app.
